@@ -1,0 +1,11 @@
+{
+    "editor.quickSuggestions": {
+    "other": "off",
+    "comments": "off",
+    "strings": "off"
+},
+"editor.suggestOnTriggerCharacters": false,
+    "json.schemas": [
+
+    ]
+}

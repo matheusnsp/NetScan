@@ -1,0 +1,15 @@
+# Ambiente virtual — recriável via requirements.txt, nunca versionar
+venv/
+
+# Cache do Python (gerado automaticamente ao rodar os .py)
+__pycache__/
+*.pyc
+
+# Arquivo de variáveis de ambiente (vai ter sua chave da NVD no futuro!)
+.env
+
+# Lixo do macOS
+.DS_Store
+
+# Arquivo temporário de testes
+teste.py
