@@ -9,14 +9,14 @@ def scan_port(host: str, port: int, timeout: float = 1.0) -> bool:
     Tenta se conectar a UMA porta de UM host e diz se ela está aberta.
 
     Parâmetros:
-        host    -> o IP ou nome do alvo (ex: "127.0.0.1")
-        port    -> o número da porta a testar (ex: 80)
-        timeout -> quanto tempo (em segundos) esperar antes de desistir.
-                   Importante: sem isso, uma porta filtrada por firewall 
-                   deixaria o programa "travado" esperando pra sempre.
+        host    ->  o IP ou nome do alvo (ex: "127.0.0.1")
+        port    ->  o número da porta a testar (ex: 80)
+        timeout ->  quanto tempo (em segundos) esperar antes de desistir.
+                    Importante: sem isso, uma porta filtrada por firewall 
+                    deixaria o programa "travado" esperando pra sempre.
     Retorna:
-        True    se a porta estiver aberta (ou seja, se a conexão for bem-sucedida)
-        False   se a porta estiver fechada ou filtrada (ou seja, se a conexão falhar)
+        True    ->  se a porta estiver aberta (ou seja, se a conexão for bem-sucedida)
+        False   ->  se a porta estiver fechada ou filtrada (ou seja, se a conexão falhar)
 
     """
     # Criamos um objeto socket. Pense nele como um "telefone" que vamos
