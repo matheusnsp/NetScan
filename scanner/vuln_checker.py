@@ -1,12 +1,31 @@
 import requests
+import os
+import time
+from dotenv import load_dotenv
 
+load_dotenv()
 
 def buscar_vulnerabilidades(termo):
 
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     parametros = {"keywordSearch": termo}    # <- usa o parâmetro, não um valor fixo
 
-    resposta = requests.get(url, params=parametros)
+
+    chave = os.getenv("NVD_API_KEY")
+    headers = {"apiKey": chave} if chave else {}
+
+
+
+    resposta = requests.get(url, params=parametros, headers=headers)
+
+    if resposta.status_code == 429:
+
+        time.sleep(6)
+        resposta = requests.get(url, params=parametros, headers=headers)
+    
+    if resposta.status_code != 200:
+        return []
+
     dados = resposta.json()
 
     resultados = []
@@ -25,7 +44,7 @@ def buscar_vulnerabilidades(termo):
         if v31:
             score = v31[0]["cvssData"]["baseScore"]
         elif v2:
-            score = v2[0]["csvssData"]["baseScore"]
+            score = v2[0]["cvssData"]["baseScore"]
 
         resultados.append({
             "id": cve_id,
