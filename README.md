@@ -49,7 +49,6 @@ netscan/
 │   ├── test_parser.py       # Testes da extração de serviço
 │   └── test_reporter.py     # Testes da coloração por severidade
 ├── requirements.txt
-├── .env.example             # Modelo para a chave da API da NVD
 └── README.md
 ```
 
@@ -67,8 +66,8 @@ netscan/
 
 ```bash
 # 1. Clone o repositório
-git clone https://github.com/SEU-USUARIO/netscan.git
-cd netscan
+git clone https://github.com/matheusnsp/NetScan.git
+cd NetScan
 
 # 2. Crie e ative um ambiente virtual
 python3 -m venv venv
@@ -78,8 +77,7 @@ source venv/bin/activate        # Linux/macOS
 pip install -r requirements.txt
 
 # 4. (Opcional) Configure a chave da API da NVD
-cp .env.example .env
-# edite o .env e adicione sua chave:
+# crie um arquivo .env na raiz do projeto com a linha:
 # NVD_API_KEY=sua-chave-aqui
 ```
 
