@@ -3,6 +3,10 @@ from scanner.banner_grabber import grab_http_banner
 from scanner.parser import extrair_servico
 from scanner.vuln_checker import buscar_vulnerabilidades
 from scanner.host_discovery import read_arp_table
+from reporter.html_report import gerar_html
+import time
+from scanner.mac_lookup import buscar_fabricante   # também no topo
+
 
 
 def escanear(alvo, porta_inicial, porta_final):
@@ -31,12 +35,18 @@ def escanear(alvo, porta_inicial, porta_final):
     return resultados        # FORA do for — retorna depois de todas as portas
 
 def listar_hosts():
-    """Mostra os aparelhos da rede e devolve a lista deles."""
+    """Mostra os aparelhos da rede (com fabricante) e devolve a lista."""
     aparelhos = read_arp_table()
 
     print("Aparelhos encontrados na rede:\n")
     for i, ap in enumerate(aparelhos, start=1):
-        print(f"  {i}. {ap['ip']:<16} {ap['mac']}")
+        # Busca o fabricante pelo MAC
+        fabricante = buscar_fabricante(ap["mac"])
+        ap["fabricante"] = fabricante           # guarda no dicionário também
+
+        print(f"  {i}. {ap['ip']:<16} {ap['mac']:<18} {fabricante}")
+
+        time.sleep(1)   # pausa de 1s pra respeitar o rate limit da API
 
     return aparelhos
 
@@ -61,7 +71,12 @@ if __name__ == "__main__":
 
     # Só chega aqui depois do break (escolha válida)
     print(f"\nEscaneando {alvo}...\n")
-    resultados = escanear(alvo, 1, 1024)     # guarda o que a função devolve
+    resultados = escanear(alvo, 1, 1024)
 
-    for r in resultados:
-        print(f"Porta {r['porta']}: serviço={r['servico']}, {len(r['cves'])} CVE(s)")
+    # Gera e salva o relatório
+    html = gerar_html(alvo, resultados)
+    nome_arquivo = f"relatorio_{alvo}.html"
+    with open(nome_arquivo, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    print(f"\nRelatório salvo em {nome_arquivo}")
