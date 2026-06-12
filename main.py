@@ -7,19 +7,100 @@ from scanner.mac_lookup import buscar_fabricante
 from reporter.html_report import gerar_html
 from reporter.json_report import gerar_json
 from reporter.csv_report import gerar_csv
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.align import Align
 import time
+
+console = Console()
+
+
+# Titulo NetScan em ASCII art (sem dependencia externa)
+NETSCAN_ASCII = r"""
+███╗   ██╗███████╗████████╗███████╗ ██████╗ █████╗ ███╗   ██╗
+████╗  ██║██╔═════╝╚══██╔══╝██╔════╝██╔════╝██╔══██╗████╗  ██║
+██╔██╗ ██║█████╗     ██║   ███████╗██║     ███████║██╔██╗ ██║
+██║╚██╗██║██╔══╝     ██║   ╚════██║██║     ██╔══██║██║╚██╗██║
+██║ ╚████║███████╗   ██║   ███████║╚██████╗██║  ██║██║ ╚████║
+╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚══════╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═══╝
+"""
+
+
+def banner_inicial():
+    """Mostra o titulo NetScan grande e centralizado."""
+    console.print(Align.center(Text(NETSCAN_ASCII, style="bold cyan")))
+    console.print(Align.center(
+        Text("Network Scanner & Vulnerability Reporter", style="dim italic")
+    ))
+    console.print()
+
+
+def cor_severidade(score):
+    """Retorna a cor (rich) conforme a gravidade CVSS."""
+    if score is None:
+        return "grey50"
+    if score >= 9.0:
+        return "bold red"
+    if score >= 7.0:
+        return "dark_orange"
+    if score >= 4.0:
+        return "yellow"
+    return "green"
+
+
+def painel_alvo(ip, descricao=None, mac=None, portas=None):
+    """Monta um painel bonito e padronizado com os dados do alvo."""
+    from rich.table import Table as _T
+    info = _T.grid(padding=(0, 2))
+    info.add_column(justify="right", style="dim")
+    info.add_column(style="bold cyan")
+    info.add_row("IP", ip)
+    if descricao:
+        info.add_row("Tipo", f"[white]{descricao}[/]")
+    if mac:
+        info.add_row("MAC", f"[dim]{mac}[/]")
+    if portas:
+        info.add_row("Portas", f"[white]{portas}[/]")
+    return Panel(info, title="[bold red]\U0001F3AF[/] [bold]ALVO[/]",
+                 border_style="cyan", expand=False, padding=(1, 2))
+
+
+def montar_tabela_resumo(resultados):
+    """Monta a tabela-resumo final (usada pelos dois modos)."""
+    tabela = Table(title="\U0001F4CB Resumo da Varredura", border_style="cyan", title_style="bold")
+    tabela.add_column("Porta", justify="center", style="cyan")
+    tabela.add_column("Servico", style="white")
+    tabela.add_column("Vulnerabilidades", justify="center")
+
+    for r in resultados:
+        cves = r["cves"]
+        servico = r["servico"] or "[dim]-[/]"
+        if cves:
+            scores = [v["score"] for v in cves if v["score"] is not None]
+            pior = max(scores) if scores else None
+            vuln_txt = Text(f"{len(cves)} CVE(s)", style=cor_severidade(pior))
+        else:
+            vuln_txt = Text("-", style="dim")
+        tabela.add_row(str(r["porta"]), servico, vuln_txt)
+
+    return tabela
 
 
 def escanear(alvo, porta_inicial, porta_final):
     """Scan REAL: escaneia um alvo de verdade e narra cada etapa."""
-    print(f"[*] Iniciando varredura de portas em {alvo} (portas {porta_inicial}-{porta_final})...")
+    console.print(painel_alvo(alvo, portas=f"{porta_inicial}-{porta_final}"))
+    console.print()
+
+    console.print("[bold yellow][*][/] Iniciando varredura de portas...")
     portas_abertas = scan_ports_fast(alvo, porta_inicial, porta_final)
-    print(f"[+] {len(portas_abertas)} porta(s) aberta(s): {portas_abertas}\n")
+    console.print(f"[bold green][+][/] {len(portas_abertas)} porta(s) aberta(s): [cyan]{portas_abertas}[/]\n")
 
     resultados = []
 
     for porta in portas_abertas:
-        print(f"[*] Analisando porta {porta}...")
+        console.print(f"[bold yellow][*][/] Analisando porta [cyan]{porta}[/]...")
         banner = grab_http_banner(alvo, porta)
 
         servico = None
@@ -28,17 +109,20 @@ def escanear(alvo, porta_inicial, porta_final):
         if banner:
             servico = extrair_servico(banner)
             if servico:
-                print(f"    [+] Serviço identificado: {servico}")
-                print(f"    [*] Consultando NVD por vulnerabilidades...")
+                console.print(f"    [green][+][/] Servico: [bold]{servico}[/]")
+                console.print("    [yellow][*][/] Consultando NVD...")
                 cves = buscar_vulnerabilidades(servico)
                 if cves:
-                    print(f"    [!] {len(cves)} vulnerabilidade(s) encontrada(s)!")
+                    console.print(f"    [bold red][!][/] [bold]{len(cves)}[/] vulnerabilidade(s) encontrada(s)!")
+                    for v in cves:
+                        cor = cor_severidade(v["score"])
+                        console.print(f"        [{cor}]* [{v['score']}] {v['id']}[/]")
                 else:
-                    print(f"    [-] Nenhuma vulnerabilidade conhecida.")
+                    console.print("    [dim][-] Nenhuma vulnerabilidade conhecida.[/]")
             else:
-                print(f"    [-] Serviço não identificado (banner sem versão).")
+                console.print("    [dim][-] Servico nao identificado (banner sem versao).[/]")
         else:
-            print(f"    [-] Sem resposta de banner.")
+            console.print("    [dim][-] Sem resposta de banner.[/]")
 
         resultados.append({
             "porta": porta,
@@ -47,16 +131,16 @@ def escanear(alvo, porta_inicial, porta_final):
             "cves": cves
         })
 
-    print(f"\n[*] Varredura concluída.")
+    console.print()
+    console.print(montar_tabela_resumo(resultados))
+    console.print("\n[bold green]Varredura concluida.[/]\n")
     return resultados
 
 
-# Hosts fictícios pra demonstração. O cenário é simulado, mas as
-# vulnerabilidades são buscadas de verdade na NVD.
 HOSTS_DEMO = [
     {
         "ip": "192.168.0.100",
-        "mac": "00:1a:11:3c:4d:5e",      
+        "mac": "00:1a:11:3c:4d:5e",
         "descricao": "Servidor Web",
         "servicos": [
             {"porta": 22, "servico": "OpenSSH 8.9"},
@@ -66,7 +150,7 @@ HOSTS_DEMO = [
     },
     {
         "ip": "192.168.0.101",
-        "mac": "2c:dc:d7:8a:9b:0c",        
+        "mac": "2c:dc:d7:8a:9b:0c",
         "descricao": "Servidor de Banco de Dados",
         "servicos": [
             {"porta": 3306, "servico": "MySQL 5.5.0"},
@@ -86,37 +170,38 @@ HOSTS_DEMO = [
 
 
 def escanear_demo(host):
-    """
-    Scan de DEMONSTRAÇÃO de um host fictício. O cenário é simulado, mas as
-    vulnerabilidades e descrições são buscadas de verdade na NVD.
-    """
+    """Scan de DEMONSTRACAO de um host ficticio, com saida formatada (rich)."""
     resultados = []
 
-    print(f"[*] Iniciando varredura de portas em {host['ip']} ({host['descricao']})...")
+    console.print(painel_alvo(host['ip'], descricao=host['descricao'], mac=host['mac']))
+    console.print()
+
+    console.print("[bold yellow][*][/] Iniciando varredura de portas...")
     time.sleep(1)
     portas = sorted(s["porta"] for s in host["servicos"])
-    print(f"[+] {len(portas)} porta(s) aberta(s): {portas}\n")
+    console.print(f"[bold green][+][/] {len(portas)} porta(s) aberta(s): [cyan]{portas}[/]\n")
     time.sleep(1)
 
     for s in host["servicos"]:
         porta = s["porta"]
         servico = s["servico"]
 
-        print(f"[*] Analisando porta {porta}...")
+        console.print(f"[bold yellow][*][/] Analisando porta [cyan]{porta}[/]...")
         time.sleep(0.6)
-        print(f"    [+] Serviço identificado: {servico}")
+        console.print(f"    [green][+][/] Servico: [bold]{servico}[/]")
         time.sleep(0.5)
-        print(f"    [*] Consultando NVD por vulnerabilidades...")
+        console.print("    [yellow][*][/] Consultando NVD...")
 
-        cves = buscar_vulnerabilidades(servico)   # busca REAL na NVD
+        cves = buscar_vulnerabilidades(servico)
         time.sleep(0.4)
 
         if cves:
-            print(f"    [!] {len(cves)} vulnerabilidade(s) encontrada(s)!")
+            console.print(f"    [bold red][!][/] [bold]{len(cves)}[/] vulnerabilidade(s) encontrada(s)!")
             for v in cves:
-                print(f"        - [{v['score']}] {v['id']}")
+                cor = cor_severidade(v["score"])
+                console.print(f"        [{cor}]* [{v['score']}] {v['id']}[/]")
         else:
-            print(f"    [-] Nenhuma vulnerabilidade conhecida.")
+            console.print("    [dim][-] Nenhuma vulnerabilidade conhecida.[/]")
 
         resultados.append({
             "porta": porta,
@@ -126,82 +211,105 @@ def escanear_demo(host):
         })
         time.sleep(0.4)
 
-    print(f"\n[*] Varredura concluída.")
+    console.print()
+    console.print(montar_tabela_resumo(resultados))
+    console.print("\n[bold green]Varredura concluida.[/]\n")
     return resultados
 
 
 def listar_hosts():
-    """Mostra os aparelhos da rede (com fabricante) e devolve a lista."""
+    """Descobre os aparelhos da rede (com fabricante) e os mostra numa tabela."""
     aparelhos = read_arp_table()
 
-    print("[*] Descobrindo aparelhos na rede (via ARP)...\n")
+    console.print("[bold yellow][*][/] Descobrindo aparelhos na rede (via ARP)...\n")
+
+    tabela = Table(border_style="cyan", title="Aparelhos na rede", title_style="bold")
+    tabela.add_column("#", justify="center", style="bold yellow")
+    tabela.add_column("IP", style="cyan")
+    tabela.add_column("MAC", style="dim")
+    tabela.add_column("Fabricante", style="white")
+
     for i, ap in enumerate(aparelhos, start=1):
         fabricante = buscar_fabricante(ap["mac"])
         ap["fabricante"] = fabricante
+        tabela.add_row(str(i), ap["ip"], ap["mac"], fabricante)
+        time.sleep(1)
 
-        print(f"  {i}. {ap['ip']:<16} {ap['mac']:<18} {fabricante}")
-        time.sleep(1)   # pausa de 1s pra respeitar o rate limit da API
-
+    console.print(tabela)
     return aparelhos
 
 
 if __name__ == "__main__":
-    aparelhos = listar_hosts()
+    banner_inicial()
 
-    print("\n  0. [MODO DEMONSTRAÇÃO — cenário fictício, CVEs reais da NVD]")
+    # ---- Escolha do MODO primeiro (antes de tocar na rede real) ----
+    console.print("[bold]Escolha o modo:[/]\n")
+    console.print("  [bold yellow]1.[/] Scan real (descobre e escaneia aparelhos da sua rede)")
+    console.print("  [bold yellow]2.[/] Modo demonstracao (cenario ficticio, CVEs reais da NVD)")
 
     while True:
-        escolha = input("\nEscolha o número do aparelho (ou 0 para demo): ")
-        try:
-            numero = int(escolha)
-
-            if numero == 0:
-                # MODO DEMO: lista os hosts fictícios e deixa escolher
-                print(f"\n{'='*50}")
-                print(f"  MODO DEMONSTRAÇÃO — escolha um host:")
-                print(f"{'='*50}\n")
-                for i, h in enumerate(HOSTS_DEMO, start=1):
-                    print(f"  {i}. {h['ip']:<16} {h['mac']:<18} {h['descricao']}")
-
-                while True:
-                    escolha_demo = input("\nEscolha o host de demo: ")
-                    try:
-                        n = int(escolha_demo)
-                        if n < 1:
-                            print("Número inválido.")
-                            continue
-                        host_demo = HOSTS_DEMO[n - 1]
-                        break
-                    except ValueError:
-                        print("Digite um número.")
-                    except IndexError:
-                        print("Não existe host com esse número.")
-
-                alvo = f"{host_demo['ip']} (DEMO - {host_demo['descricao']})"
-                print(f"\n{'='*50}")
-                print(f"  ALVO: {host_demo['ip']} — {host_demo['descricao']}")
-                print(f"{'='*50}\n")
-                resultados = escanear_demo(host_demo)
-                break
-
-            if numero < 1:
-                print("Número inválido.")
-                continue
-
-            # MODO REAL
-            alvo = aparelhos[numero - 1]["ip"]
-            print(f"\n{'='*50}")
-            print(f"  ALVO SELECIONADO: {alvo}")
-            print(f"{'='*50}\n")
-            resultados = escanear(alvo, 1, 1024)
+        modo = input("\nDigite 1 ou 2: ").strip()
+        if modo in ("1", "2"):
             break
+        print("Opcao invalida. Digite 1 ou 2.")
 
-        except ValueError:
-            print("Isso não é um número. Digite o número da lista.")
-        except IndexError:
-            print("Não existe aparelho com esse número.")
+    resultados = None
+    alvo = None
 
-    print(f"\n[*] Gerando relatórios...")
+    if modo == "2":
+        # ===== MODO DEMONSTRACAO =====
+        console.print()
+        tabela_hosts = Table(title="Hosts disponiveis (demonstracao)",
+                             border_style="cyan", title_style="bold")
+        tabela_hosts.add_column("#", justify="center", style="bold yellow")
+        tabela_hosts.add_column("IP", style="cyan")
+        tabela_hosts.add_column("MAC", style="dim")
+        tabela_hosts.add_column("Descricao", style="white")
+        for i, h in enumerate(HOSTS_DEMO, start=1):
+            tabela_hosts.add_row(str(i), h["ip"], h["mac"], h["descricao"])
+        console.print(tabela_hosts)
+
+        while True:
+            escolha_demo = input("\nEscolha o host de demo: ")
+            try:
+                n = int(escolha_demo)
+                if n < 1:
+                    print("Numero invalido.")
+                    continue
+                host_demo = HOSTS_DEMO[n - 1]
+                break
+            except ValueError:
+                print("Digite um numero.")
+            except IndexError:
+                print("Nao existe host com esse numero.")
+
+        alvo = f"{host_demo['ip']} (DEMO - {host_demo['descricao']})"
+        console.print()
+        resultados = escanear_demo(host_demo)
+
+    else:
+        # ===== MODO REAL =====
+        aparelhos = listar_hosts()
+
+        while True:
+            escolha = input("\nEscolha o numero do aparelho: ")
+            try:
+                numero = int(escolha)
+                if numero < 1:
+                    print("Numero invalido.")
+                    continue
+                alvo = aparelhos[numero - 1]["ip"]
+                break
+            except ValueError:
+                print("Isso nao e um numero. Digite o numero da lista.")
+            except IndexError:
+                print("Nao existe aparelho com esse numero.")
+
+        console.print()
+        resultados = escanear(alvo, 1, 1024)
+
+    # ---- Geracao de relatorios (igual pros dois modos) ----
+    console.print("[bold yellow][*][/] Gerando relatorios...")
     nome_base = f"relatorio_{alvo}".replace(" ", "_").replace("(", "").replace(")", "")
     html = gerar_html(alvo, resultados)
     with open(f"{nome_base}.html", "w", encoding="utf-8") as f:
@@ -209,7 +317,9 @@ if __name__ == "__main__":
     gerar_json(alvo, resultados, f"{nome_base}.json")
     gerar_csv(resultados, f"{nome_base}.csv")
 
-    print(f"[+] Relatórios salvos:")
-    print(f"    - {nome_base}.html  (visual)")
-    print(f"    - {nome_base}.json  (dados estruturados)")
-    print(f"    - {nome_base}.csv   (planilha)")
+    console.print(Panel(
+        f"[green]ok[/] [bold]{nome_base}.html[/]  [dim](visual)[/]\n"
+        f"[green]ok[/] [bold]{nome_base}.json[/]  [dim](dados estruturados)[/]\n"
+        f"[green]ok[/] [bold]{nome_base}.csv[/]   [dim](planilha)[/]",
+        title="[bold]\U0001F4C1 Relatorios salvos[/]", border_style="green", expand=False
+    ))
