@@ -7,26 +7,28 @@ from scanner.host_discovery import read_arp_table
 
 def escanear(alvo, porta_inicial, porta_final):
     portas_abertas = scan_ports_fast(alvo, porta_inicial, porta_final)
-    print(f"Portas abertas em {alvo}: {portas_abertas}")
+
+    resultados = []
 
     for porta in portas_abertas:
         banner = grab_http_banner(alvo, porta)
 
+        servico = None
+        cves = []
+
         if banner:
             servico = extrair_servico(banner)
             if servico:
-                print(f"Porta {porta}: {servico}")
-                vulns = buscar_vulnerabilidades(servico)
+                cves = buscar_vulnerabilidades(servico)   # guarda em "cves"
 
-                if vulns:
-                    for v in vulns:
-                        print(f"    [{v['score']}] {v['id']}")
-                else:
-                    print(" Nenhum CVE encontrado.")
+        resultados.append({
+            "porta": porta,
+            "banner": banner,
+            "servico": servico,
+            "cves": cves
+        })
 
-        print(f"\n--- Porta {porta} ---")
-        print(banner)
-
+    return resultados        # FORA do for — retorna depois de todas as portas
 
 def listar_hosts():
     """Mostra os aparelhos da rede e devolve a lista deles."""
@@ -59,4 +61,7 @@ if __name__ == "__main__":
 
     # Só chega aqui depois do break (escolha válida)
     print(f"\nEscaneando {alvo}...\n")
-    escanear(alvo, 1, 1024)
+    resultados = escanear(alvo, 1, 1024)     # guarda o que a função devolve
+
+    for r in resultados:
+        print(f"Porta {r['porta']}: serviço={r['servico']}, {len(r['cves'])} CVE(s)")
