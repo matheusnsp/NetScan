@@ -17,10 +17,10 @@ import time
 console = Console()
 
 
-# Titulo NetScan em ASCII art (sem dependencia externa)
+# Titulo NetScan em ASCII art (blocos solidos)
 NETSCAN_ASCII = r"""
 ███╗   ██╗███████╗████████╗███████╗ ██████╗ █████╗ ███╗   ██╗
-████╗  ██║██╔═════╝╚══██╔══╝██╔════╝██╔════╝██╔══██╗████╗  ██║
+████╗  ██║██╔════╝╚══██╔══╝██╔════╝██╔════╝██╔══██╗████╗  ██║
 ██╔██╗ ██║█████╗     ██║   ███████╗██║     ███████║██╔██╗ ██║
 ██║╚██╗██║██╔══╝     ██║   ╚════██║██║     ██╔══██║██║╚██╗██║
 ██║ ╚████║███████╗   ██║   ███████║╚██████╗██║  ██║██║ ╚████║
@@ -52,8 +52,7 @@ def cor_severidade(score):
 
 def painel_alvo(ip, descricao=None, mac=None, portas=None):
     """Monta um painel bonito e padronizado com os dados do alvo."""
-    from rich.table import Table as _T
-    info = _T.grid(padding=(0, 2))
+    info = Table.grid(padding=(0, 2))
     info.add_column(justify="right", style="dim")
     info.add_column(style="bold cyan")
     info.add_row("IP", ip)
@@ -71,18 +70,18 @@ def montar_tabela_resumo(resultados):
     """Monta a tabela-resumo final (usada pelos dois modos)."""
     tabela = Table(title="\U0001F4CB Resumo da Varredura", border_style="cyan", title_style="bold")
     tabela.add_column("Porta", justify="center", style="cyan")
-    tabela.add_column("Servico", style="white")
+    tabela.add_column("Serviço", style="white")
     tabela.add_column("Vulnerabilidades", justify="center")
 
     for r in resultados:
         cves = r["cves"]
-        servico = r["servico"] or "[dim]-[/]"
+        servico = r["servico"] or "[dim]—[/]"
         if cves:
             scores = [v["score"] for v in cves if v["score"] is not None]
             pior = max(scores) if scores else None
             vuln_txt = Text(f"{len(cves)} CVE(s)", style=cor_severidade(pior))
         else:
-            vuln_txt = Text("-", style="dim")
+            vuln_txt = Text("—", style="dim")
         tabela.add_row(str(r["porta"]), servico, vuln_txt)
 
     return tabela
@@ -109,18 +108,18 @@ def escanear(alvo, porta_inicial, porta_final):
         if banner:
             servico = extrair_servico(banner)
             if servico:
-                console.print(f"    [green][+][/] Servico: [bold]{servico}[/]")
+                console.print(f"    [green][+][/] Serviço: [bold]{servico}[/]")
                 console.print("    [yellow][*][/] Consultando NVD...")
                 cves = buscar_vulnerabilidades(servico)
                 if cves:
                     console.print(f"    [bold red][!][/] [bold]{len(cves)}[/] vulnerabilidade(s) encontrada(s)!")
                     for v in cves:
                         cor = cor_severidade(v["score"])
-                        console.print(f"        [{cor}]* [{v['score']}] {v['id']}[/]")
+                        console.print(f"        [{cor}]• [{v['score']}] {v['id']}[/]")
                 else:
                     console.print("    [dim][-] Nenhuma vulnerabilidade conhecida.[/]")
             else:
-                console.print("    [dim][-] Servico nao identificado (banner sem versao).[/]")
+                console.print("    [dim][-] Serviço não identificado (banner sem versão).[/]")
         else:
             console.print("    [dim][-] Sem resposta de banner.[/]")
 
@@ -133,7 +132,7 @@ def escanear(alvo, porta_inicial, porta_final):
 
     console.print()
     console.print(montar_tabela_resumo(resultados))
-    console.print("\n[bold green]Varredura concluida.[/]\n")
+    console.print("\n[bold green]✓ Varredura concluída.[/]\n")
     return resultados
 
 
@@ -170,7 +169,7 @@ HOSTS_DEMO = [
 
 
 def escanear_demo(host):
-    """Scan de DEMONSTRACAO de um host ficticio, com saida formatada (rich)."""
+    """Scan de DEMONSTRAÇÃO de um host fictício, com saída formatada (rich)."""
     resultados = []
 
     console.print(painel_alvo(host['ip'], descricao=host['descricao'], mac=host['mac']))
@@ -188,7 +187,7 @@ def escanear_demo(host):
 
         console.print(f"[bold yellow][*][/] Analisando porta [cyan]{porta}[/]...")
         time.sleep(0.6)
-        console.print(f"    [green][+][/] Servico: [bold]{servico}[/]")
+        console.print(f"    [green][+][/] Serviço: [bold]{servico}[/]")
         time.sleep(0.5)
         console.print("    [yellow][*][/] Consultando NVD...")
 
@@ -199,7 +198,7 @@ def escanear_demo(host):
             console.print(f"    [bold red][!][/] [bold]{len(cves)}[/] vulnerabilidade(s) encontrada(s)!")
             for v in cves:
                 cor = cor_severidade(v["score"])
-                console.print(f"        [{cor}]* [{v['score']}] {v['id']}[/]")
+                console.print(f"        [{cor}]• [{v['score']}] {v['id']}[/]")
         else:
             console.print("    [dim][-] Nenhuma vulnerabilidade conhecida.[/]")
 
@@ -213,7 +212,7 @@ def escanear_demo(host):
 
     console.print()
     console.print(montar_tabela_resumo(resultados))
-    console.print("\n[bold green]Varredura concluida.[/]\n")
+    console.print("\n[bold green]✓ Varredura concluída.[/]\n")
     return resultados
 
 
@@ -245,26 +244,26 @@ if __name__ == "__main__":
     # ---- Escolha do MODO primeiro (antes de tocar na rede real) ----
     console.print("[bold]Escolha o modo:[/]\n")
     console.print("  [bold yellow]1.[/] Scan real (descobre e escaneia aparelhos da sua rede)")
-    console.print("  [bold yellow]2.[/] Modo demonstracao (cenario ficticio, CVEs reais da NVD)")
+    console.print("  [bold yellow]2.[/] Modo demonstração (cenário fictício, CVEs reais da NVD)")
 
     while True:
         modo = input("\nDigite 1 ou 2: ").strip()
         if modo in ("1", "2"):
             break
-        print("Opcao invalida. Digite 1 ou 2.")
+        print("Opção inválida. Digite 1 ou 2.")
 
     resultados = None
     alvo = None
 
     if modo == "2":
-        # ===== MODO DEMONSTRACAO =====
+        # ===== MODO DEMONSTRAÇÃO =====
         console.print()
-        tabela_hosts = Table(title="Hosts disponiveis (demonstracao)",
+        tabela_hosts = Table(title="Hosts disponíveis (demonstração)",
                              border_style="cyan", title_style="bold")
         tabela_hosts.add_column("#", justify="center", style="bold yellow")
         tabela_hosts.add_column("IP", style="cyan")
         tabela_hosts.add_column("MAC", style="dim")
-        tabela_hosts.add_column("Descricao", style="white")
+        tabela_hosts.add_column("Descrição", style="white")
         for i, h in enumerate(HOSTS_DEMO, start=1):
             tabela_hosts.add_row(str(i), h["ip"], h["mac"], h["descricao"])
         console.print(tabela_hosts)
@@ -274,14 +273,14 @@ if __name__ == "__main__":
             try:
                 n = int(escolha_demo)
                 if n < 1:
-                    print("Numero invalido.")
+                    print("Número inválido.")
                     continue
                 host_demo = HOSTS_DEMO[n - 1]
                 break
             except ValueError:
-                print("Digite um numero.")
+                print("Digite um número.")
             except IndexError:
-                print("Nao existe host com esse numero.")
+                print("Não existe host com esse número.")
 
         alvo = f"{host_demo['ip']} (DEMO - {host_demo['descricao']})"
         console.print()
@@ -292,24 +291,24 @@ if __name__ == "__main__":
         aparelhos = listar_hosts()
 
         while True:
-            escolha = input("\nEscolha o numero do aparelho: ")
+            escolha = input("\nEscolha o número do aparelho: ")
             try:
                 numero = int(escolha)
                 if numero < 1:
-                    print("Numero invalido.")
+                    print("Número inválido.")
                     continue
                 alvo = aparelhos[numero - 1]["ip"]
                 break
             except ValueError:
-                print("Isso nao e um numero. Digite o numero da lista.")
+                print("Isso não é um número. Digite o número da lista.")
             except IndexError:
-                print("Nao existe aparelho com esse numero.")
+                print("Não existe aparelho com esse número.")
 
         console.print()
         resultados = escanear(alvo, 1, 1024)
 
-    # ---- Geracao de relatorios (igual pros dois modos) ----
-    console.print("[bold yellow][*][/] Gerando relatorios...")
+    # ---- Geração de relatórios (igual pros dois modos) ----
+    console.print("[bold yellow][*][/] Gerando relatórios...")
     nome_base = f"relatorio_{alvo}".replace(" ", "_").replace("(", "").replace(")", "")
     html = gerar_html(alvo, resultados)
     with open(f"{nome_base}.html", "w", encoding="utf-8") as f:
@@ -318,8 +317,8 @@ if __name__ == "__main__":
     gerar_csv(resultados, f"{nome_base}.csv")
 
     console.print(Panel(
-        f"[green]ok[/] [bold]{nome_base}.html[/]  [dim](visual)[/]\n"
-        f"[green]ok[/] [bold]{nome_base}.json[/]  [dim](dados estruturados)[/]\n"
-        f"[green]ok[/] [bold]{nome_base}.csv[/]   [dim](planilha)[/]",
-        title="[bold]\U0001F4C1 Relatorios salvos[/]", border_style="green", expand=False
+        f"[green]✓[/] [bold]{nome_base}.html[/]  [dim](visual)[/]\n"
+        f"[green]✓[/] [bold]{nome_base}.json[/]  [dim](dados estruturados)[/]\n"
+        f"[green]✓[/] [bold]{nome_base}.csv[/]   [dim](planilha)[/]",
+        title="[bold]\U0001F4C1 Relatórios salvos[/]", border_style="green", expand=False
     ))
