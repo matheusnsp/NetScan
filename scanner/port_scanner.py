@@ -51,7 +51,7 @@ def scan_port(host: str, port: int, timeout: float = 1.0) -> bool:
     
 
 def scan_ports_fast(host: str, start_port: int, end_port: int,
-                    timeout: float = 1.0, max_threads: int = 100) ->[int]:
+                    timeout: float = 1.0, max_threads: int = 100) -> list[int]:
     """
 
     Escaneira um range de portas em paralelo usando um pool threads.
