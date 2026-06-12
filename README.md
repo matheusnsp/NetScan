@@ -20,10 +20,11 @@ O NetScan executa o fluxo de reconhecimento de um pentest de ponta a ponta:
 
 ## ✨ Destaques técnicos
 
-- **Varredura concorrente** com `ThreadPoolExecutor` — escaneia mais de 1000 portas em segundos (tarefa I/O-bound, ideal para threads).
-- **Integração real com a NVD** — autenticação por API key, tratamento de *rate limit* (HTTP 429) e navegação entre diferentes versões do CVSS (v3.1 e v2).
-- **Identificação de fabricante por OUI** — consulta o MAC na base de fabricantes; lida graciosamente com *MAC randomization* (dispositivos modernos que ocultam o fabricante por privacidade).
+- **Varredura concorrente com ThreadPoolExecutor** — escaneia mais de 1000 portas em segundos (tarefa I/O-bound, ideal para threads).
+- **Integração real com a NVD** — autenticação por API key, tratamento de rate limit (HTTP 429) e navegação entre diferentes versões do CVSS (v3.1 e v2).
+- **Identificação de fabricante por OUI** — consulta o MAC na base de fabricantes; lida graciosamente com MAC randomization (dispositivos modernos que ocultam o fabricante por privacidade).
 - **Saída em múltiplos formatos** a partir de uma única estrutura de dados, com severidade codificada por cores no relatório HTML.
+- **Interface de terminal rica** (com a biblioteca `rich`): título, tabelas, painéis e narração colorida de cada etapa.
 - **Tratamento robusto de falhas** — serviços silenciosos, banners sem versão, alvos sem CVE e erros de rede são tratados sem interromper a execução.
 - **Testes automatizados** com `pytest` cobrindo as funções de processamento de dados.
 
@@ -91,16 +92,14 @@ Execute o programa:
 python3 main.py
 ```
 
-O NetScan vai:
+Ao iniciar, o NetScan pergunta qual **modo** você quer usar:
 
-1. Listar os aparelhos encontrados na rede (com IP, MAC e fabricante).
-2. Pedir para você escolher um alvo pelo número.
-3. Escanear o alvo escolhido, narrando cada etapa no terminal.
-4. Gerar os relatórios (`relatorio_<ALVO>.html`, `.json` e `.csv`).
+1. **Scan real** — descobre os aparelhos da sua rede, lista cada um (IP, MAC e fabricante) e pede para você escolher um alvo pelo número. Em seguida escaneia o alvo de verdade.
+2. **Modo demonstração** — lista hosts fictícios para você escolher. O cenário (os hosts) é simulado, mas as vulnerabilidades exibidas são **consultadas de verdade na NVD**. Útil para apresentar a ferramenta sem expor uma rede real.
+
+Em ambos os modos, o NetScan narra cada etapa no terminal (varredura, identificação de serviço, consulta de CVEs) e, ao final, gera os relatórios `relatorio_<ALVO>.html`, `.json` e `.csv`.
 
 Abra o arquivo `.html` gerado no navegador para ver o relatório visual.
-
-> **Modo demonstração:** digite `0` no menu para rodar um cenário de demonstração com hosts fictícios. As vulnerabilidades exibidas são consultadas de verdade na NVD — apenas o cenário (os hosts) é simulado.
 
 ---
 
@@ -135,6 +134,7 @@ O relatório HTML apresenta:
 | `socket` | Varredura de portas e banner grabbing (biblioteca padrão) |
 | `concurrent.futures` | Varredura concorrente com pool de threads |
 | `requests` | Chamadas às APIs da NVD e de fabricantes |
+| `rich` | Interface de terminal (tabelas, painéis, cores) |
 | `python-dotenv` | Carregamento da chave de API a partir do `.env` |
 | `subprocess` / `re` | Leitura e parsing da tabela ARP |
 | `pytest` | Testes automatizados |
@@ -158,6 +158,8 @@ O relatório HTML apresenta:
 - [x] Banner grabbing (TCP e HTTP)
 - [x] Integração com a API NVD/NIST (com API key e rate limit)
 - [x] Relatórios em HTML, JSON e CSV
+- [x] Interface de terminal com `rich`
+- [x] Modo demonstração para apresentação
 - [x] Testes automatizados
 
 **Possíveis evoluções:**
