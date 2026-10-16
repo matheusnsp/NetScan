@@ -1,6 +1,6 @@
 # 🔍 NetScan — Network Scanner & Vulnerability Reporter
 
-> Ferramenta de linha de comando (CLI) em Python que automatiza as etapas iniciais de um teste de penetração: descoberta de hosts, varredura de portas, identificação de serviços e cruzamento com vulnerabilidades conhecidas (CVEs) da base do NIST.
+> Ferramenta de linha de comando (CLI) em Python que automatiza o reconhecimento inicial de um teste de penetração: descoberta de hosts, varredura de portas, **identificação de serviço por protocolo**, cruzamento com CVEs da NVD/NIST **por CPE**, **priorização com CISA KEV + EPSS** e **checagens de má configuração**.
 
 Desenvolvido para fins **educacionais** e de **pentest autorizado**.
 
@@ -8,169 +8,143 @@ Desenvolvido para fins **educacionais** e de **pentest autorizado**.
 
 ## 📌 O que o NetScan faz
 
-O NetScan executa o fluxo de reconhecimento de um pentest de ponta a ponta:
+1. **Descoberta de hosts** — aparelhos ativos via tabela ARP, com identificação de fabricante pelo MAC.
+2. **Varredura de portas** — portas TCP abertas, concorrente (ThreadPoolExecutor). Perfis `top100`, `all` ou ranges/listas.
+3. **Detecção de serviço** — fingerprinting por protocolo (SSH, FTP, SMTP, MySQL/MariaDB, Redis, MongoDB, HTTP/HTTPS com TLS), não só a linha `Server:` do HTTP.
+4. **Checagem de vulnerabilidades** — cruza serviço+versão com a NVD **por CPE** (muito menos falso-positivo que busca por palavra-chave), com timeout, tratamento de rate limit e **cache local**.
+5. **Priorização** — enriquece cada CVE com **CISA KEV** (exploração ativa) e **EPSS** (probabilidade de exploração), e calcula um **score de risco** por host.
+6. **Má configuração** — Redis/MongoDB sem autenticação, FTP anônimo, Telnet exposto, TLS obsoleto/expirado, cabeçalhos de segurança HTTP ausentes.
+7. **Relatórios** — HTML (com resumo executivo e "corrija primeiro"), JSON, **JSON Lines (para SIEM)** e CSV.
 
-1. **Descoberta de hosts** — identifica os aparelhos ativos na rede local (via tabela ARP) e tenta identificar o **fabricante** de cada um pelo endereço MAC.
-2. **Varredura de portas** — detecta portas TCP abertas no alvo, de forma **concorrente** (rápida).
-3. **Banner grabbing** — coleta informações dos serviços rodando nas portas abertas (incluindo versão, quando exposta).
-4. **Checagem de vulnerabilidades** — cruza os serviços detectados com CVEs conhecidos consultando a **API pública da NVD/NIST**, retornando o ID, a severidade (CVSS) e a descrição de cada vulnerabilidade.
-5. **Geração de relatórios** — exporta o resultado em **HTML** (visual, com severidade colorida), **JSON** (dados estruturados) e **CSV** (planilha).
-
----
-
-## ✨ Destaques técnicos
-
-- **Varredura concorrente com ThreadPoolExecutor** — escaneia mais de 1000 portas em segundos (tarefa I/O-bound, ideal para threads).
-- **Integração real com a NVD** — autenticação por API key, tratamento de rate limit (HTTP 429) e navegação entre diferentes versões do CVSS (v3.1 e v2).
-- **Identificação de fabricante por OUI** — consulta o MAC na base de fabricantes; lida graciosamente com MAC randomization (dispositivos modernos que ocultam o fabricante por privacidade).
-- **Saída em múltiplos formatos** a partir de uma única estrutura de dados, com severidade codificada por cores no relatório HTML.
-- **Interface de terminal rica** (com a biblioteca `rich`): título, tabelas, painéis e narração colorida de cada etapa.
-- **Tratamento robusto de falhas** — serviços silenciosos, banners sem versão, alvos sem CVE e erros de rede são tratados sem interromper a execução.
-- **Testes automatizados** com `pytest` cobrindo as funções de processamento de dados.
-
----
-
-## 🗂️ Estrutura do projeto
-
-```
-netscan/
-├── main.py                  # Ponto de entrada e orquestração do fluxo
-├── scanner/
-│   ├── port_scanner.py      # Varredura de portas concorrente
-│   ├── banner_grabber.py    # Coleta de banners (TCP e HTTP)
-│   ├── parser.py            # Extração de serviço/versão dos banners
-│   ├── host_discovery.py    # Descoberta de hosts (TCP ping + tabela ARP)
-│   ├── vuln_checker.py      # Integração com a API da NVD/NIST
-│   └── mac_lookup.py        # Identificação de fabricante pelo MAC
-├── reporter/
-│   ├── html_report.py       # Relatório HTML (severidade colorida)
-│   ├── json_report.py       # Exportação JSON
-│   └── csv_report.py        # Exportação CSV
-├── tests/
-│   ├── test_parser.py       # Testes da extração de serviço
-│   └── test_reporter.py     # Testes da coloração por severidade
-├── requirements.txt
-└── README.md
-```
-
----
-
-## ⚙️ Pré-requisitos
-
-- Python **3.10+**
-- Sistema operacional **Linux** ou **macOS** (a leitura da tabela ARP usa o comando `arp` do sistema)
-- (Opcional, recomendado) Uma chave de API gratuita da [NIST NVD](https://nvd.nist.gov/developers/request-an-api-key) — sem ela a API funciona, mas com limite de requisições mais baixo.
+> As checagens de má configuração são **de leitura e não-destrutivas**: verificam a *postura* do serviço (exige senha? certificado válido?), sem alterar dados nem explorar nada — o equivalente a conferir se a porta está trancada.
 
 ---
 
 ## 🚀 Instalação
 
 ```bash
-# 1. Clone o repositório
 git clone https://github.com/matheusnsp/NetScan.git
 cd NetScan
-
-# 2. Crie e ative um ambiente virtual
-python3 -m venv venv
-source venv/bin/activate        # Linux/macOS
-
-# 3. Instale as dependências
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# 4. (Opcional) Configure a chave da API da NVD
-# crie um arquivo .env na raiz do projeto com a linha:
-# NVD_API_KEY=sua-chave-aqui
+# (opcional) chave da NVD para limite de requisições maior:
+echo "NVD_API_KEY=sua-chave-aqui" > .env
 ```
 
 ---
 
 ## 🖥️ Como usar
 
-Execute o programa:
+### Modo CLI (scriptável)
+
+```bash
+# Um host, 100 portas mais comuns, relatórios HTML + JSON
+python3 main.py 192.168.0.10 --ports top100 --format html,json
+
+# Uma sub-rede inteira, portas 1–1024
+python3 main.py 192.168.0.0/24 --ports 1-1024
+
+# Lista de alvos de um arquivo, portas específicas, sem consultar CVE
+python3 main.py alvos.txt --ports 22,80,443 --no-vuln
+
+# Saída JSON Lines para ingestão em SIEM (Wazuh/Splunk/Elastic)
+python3 main.py 10.0.0.5 --format jsonl -o ./relatorios
+
+# Demonstração (cenário fictício, CVEs reais da NVD)
+python3 main.py --demo
+```
+
+Principais opções:
+
+| Flag | Descrição | Padrão |
+|---|---|---|
+| `-p, --ports` | `top100` \| `all` \| `1-1024` \| `80,443,8080` | `top100` |
+| `-f, --format` | `html,json,jsonl,csv` (combináveis) | `html,json` |
+| `-o, --output` | diretório de saída | `.` |
+| `-t, --timeout` | timeout por conexão (s) | `1.5` |
+| `--threads` | threads de varredura | `100` |
+| `--no-vuln` | só portas/serviços, sem NVD | — |
+| `--no-config` | pula checagens de má configuração | — |
+| `--log` | arquivo de log | — |
+| `-q, --quiet` | menos saída no terminal | — |
+
+### Modo interativo
+
+Sem argumentos, cai no menu de sempre (scan real ou demonstração):
 
 ```bash
 python3 main.py
 ```
 
-Ao iniciar, o NetScan pergunta qual **modo** você quer usar:
-
-1. **Scan real** — descobre os aparelhos da sua rede, lista cada um (IP, MAC e fabricante) e pede para você escolher um alvo pelo número. Em seguida escaneia o alvo de verdade.
-2. **Modo demonstração** — lista hosts fictícios para você escolher. O cenário (os hosts) é simulado, mas as vulnerabilidades exibidas são **consultadas de verdade na NVD**. Útil para apresentar a ferramenta sem expor uma rede real.
-
-Em ambos os modos, o NetScan narra cada etapa no terminal (varredura, identificação de serviço, consulta de CVEs) e, ao final, gera os relatórios `relatorio_<ALVO>.html`, `.json` e `.csv`.
-
-Abra o arquivo `.html` gerado no navegador para ver o relatório visual.
-
 ---
 
 ## 🧪 Testes
-
-O projeto inclui testes automatizados das funções de processamento:
 
 ```bash
 pytest
 ```
 
+A suíte cobre, offline: fingerprinting de serviço, montagem de CPE, priorização (KEV/EPSS), perfis de porta e resolução de alvos (CIDR/arquivo), e o **escape de HTML do relatório** (regressão de XSS).
+
 ---
 
-## 📊 Exemplo de relatório
+## 🗂️ Estrutura
 
-O relatório HTML apresenta:
+```
+netscan/
+├── main.py                  # CLI + menu interativo + orquestração
+├── scanner/
+│   ├── port_scanner.py      # varredura concorrente de portas
+│   ├── service_detect.py    # fingerprinting de serviço por protocolo
+│   ├── vuln_checker.py      # NVD por CPE, com cache e rate limit
+│   ├── enrich.py            # CISA KEV + EPSS
+│   ├── misconfig.py         # checagens de má configuração (não-destrutivas)
+│   ├── scoring.py           # priorização e resumo executivo
+│   ├── targets.py           # perfis de porta e alvos (CIDR/arquivo)
+│   ├── host_discovery.py    # descoberta de hosts (ARP + TCP)
+│   └── mac_lookup.py        # fabricante pelo MAC
+├── reporter/
+│   ├── html_report.py       # relatório HTML (com escape e resumo executivo)
+│   ├── json_report.py       # JSON + JSON Lines (SIEM)
+│   └── csv_report.py        # CSV (com severidade, KEV, EPSS)
+├── tests/
+└── requirements.txt
+```
 
-- Um resumo executivo (total de portas abertas e de vulnerabilidades).
-- Uma tabela com cada porta, o serviço identificado e os CVEs associados.
-- CVEs codificados por cor conforme a severidade CVSS:
-  - 🔴 **Crítico** (9.0–10.0)
-  - 🟠 **Alto** (7.0–8.9)
-  - 🟡 **Médio** (4.0–6.9)
-  - 🟢 **Baixo** (< 4.0)
+---
+
+## 📊 Relatório
+
+O HTML traz, no topo, um **resumo executivo**: score de risco do host, contagem por severidade, total de CVEs em KEV e de achados de configuração, e a tabela **"Corrija primeiro"** (ordenada por KEV → EPSS → CVSS). Cada CVE pode exibir os selos **KEV** e **EPSS**.
+
+Severidade por cor (CVSS): 🔴 crítico (9.0–10) · 🟠 alto (7.0–8.9) · 🟡 médio (4.0–6.9) · 🟢 baixo (<4.0).
 
 ---
 
 ## 🧰 Tecnologias
 
-| Biblioteca | Uso |
-|---|---|
-| `socket` | Varredura de portas e banner grabbing (biblioteca padrão) |
-| `concurrent.futures` | Varredura concorrente com pool de threads |
-| `requests` | Chamadas às APIs da NVD e de fabricantes |
-| `rich` | Interface de terminal (tabelas, painéis, cores) |
-| `python-dotenv` | Carregamento da chave de API a partir do `.env` |
-| `subprocess` / `re` | Leitura e parsing da tabela ARP |
-| `pytest` | Testes automatizados |
+`socket`, `ssl`, `concurrent.futures`, `ipaddress`, `argparse`, `logging` (biblioteca padrão) · `requests` (NVD, KEV, EPSS, macvendors) · `rich` (terminal) · `python-dotenv` · `pytest`.
+
+Fontes de dados: **NVD/NIST** (CVE por CPE), **CISA KEV** (exploração ativa), **FIRST EPSS** (probabilidade de exploração).
 
 ---
 
 ## ⚠️ Aviso legal
 
-> Esta ferramenta foi desenvolvida **exclusivamente para fins educacionais e para testes em redes próprias ou com autorização explícita do proprietário**.
->
-> O uso não autorizado em redes de terceiros é **ilegal** e pode resultar em penalidades criminais. O autor não se responsabiliza por usos indevidos.
+> Ferramenta **exclusivamente para fins educacionais e testes em redes próprias ou com autorização explícita do proprietário**. O uso não autorizado em redes de terceiros é **ilegal**. O autor não se responsabiliza por usos indevidos. O score de risco é um auxílio de **triagem**, não um laudo.
 
 ---
 
-## 🗺️ Status e melhorias futuras
+## 🗺️ Melhorias futuras
 
-**Implementado:**
-
-- [x] Descoberta de hosts (TCP + ARP) com identificação de fabricante
-- [x] Varredura de portas TCP concorrente
-- [x] Banner grabbing (TCP e HTTP)
-- [x] Integração com a API NVD/NIST (com API key e rate limit)
-- [x] Relatórios em HTML, JSON e CSV
-- [x] Interface de terminal com `rich`
-- [x] Modo demonstração para apresentação
-- [x] Testes automatizados
-
-**Possíveis evoluções:**
-
+- [ ] Diff entre scans (alertar porta/serviço que surgiu desde a última varredura)
 - [ ] Exportação para PDF
 - [ ] Varredura UDP
 - [ ] Interface web (Flask/FastAPI)
-- [ ] Sistema de logging em arquivo
+- [ ] Dockerfile + GitHub Actions rodando a suíte
 
 ---
 
 ## 📄 Licença
 
-Distribuído sob a licença MIT.
+MIT.
