@@ -51,8 +51,33 @@ def _badges(v: dict) -> str:
     return b
 
 
+def _secao_diff(diff: dict | None) -> str:
+    """Bloco HTML de 'mudanças desde o último scan'. Vazio se não houver diff útil."""
+    if not diff or diff.get("primeira_vez") or not diff.get("houve_mudanca"):
+        return ""
+    linhas = ""
+    for p in diff.get("portas_novas", []):
+        linhas += f"<li><span style='color:#3fb950'>▲ Porta {p} <strong>abriu</strong></span></li>"
+    for p in diff.get("portas_fechadas", []):
+        linhas += f"<li><span style='color:#8b949e'>▼ Porta {p} fechou</span></li>"
+    for porta, antes, agora in diff.get("servicos_alterados", []):
+        linhas += (f"<li><span style='color:#d29922'>~ Porta {porta}: "
+                   f"{_esc(antes or '—')} → {_esc(agora or '—')}</span></li>")
+    kev_set = set(diff.get("kev_novos", []))
+    for porta, cid in diff.get("cves_novos", []):
+        marca = " <span class='badge kev'>KEV</span>" if (porta, cid) in kev_set else ""
+        linhas += (f"<li><span style='color:#f85149'>! CVE novo na porta {porta}: "
+                   f"<code>{_esc(cid)}</code></span>{marca}</li>")
+    for a in diff.get("config_novos", []):
+        linhas += (f"<li><span style='color:#db61a2'>! Nova má configuração: "
+                   f"{_esc(a.get('titulo'))} (porta {_esc(a.get('porta'))})</span></li>")
+    return ("<h2>🔔 Mudanças desde o último scan</h2>\n"
+            "<div class='diff'><ul>" + linhas + "</ul></div>\n")
+
+
 def gerar_html(alvo: str, resultados: list[dict],
-               achados_config: list[dict] | None = None) -> str:
+               achados_config: list[dict] | None = None,
+               diff: dict | None = None) -> str:
     """Monta o relatório HTML a partir dos resultados do scan."""
     achados_config = achados_config or []
     resumo = resumir(resultados, achados_config)
@@ -84,6 +109,9 @@ def gerar_html(alvo: str, resultados: list[dict],
         .sev {{ font-weight: 700; padding: 2px 8px; border-radius: 6px; font-size: .85em; }}
         .desc {{ color: #8b949e; font-size: .9em; }}
         code {{ background: #161b22; padding: 1px 5px; border-radius: 4px; }}
+        .diff {{ background: #161b22; border: 1px solid #30363d; border-left: 6px solid #d29922; border-radius: 10px; padding: 8px 20px; }}
+        .diff ul {{ list-style: none; padding-left: 0; }}
+        .diff li {{ padding: 4px 0; border-bottom: 1px solid #21262d; }}
         footer {{ margin-top: 40px; color: #8b949e; font-size: .8em; }}
     </style>
 </head>
@@ -108,6 +136,9 @@ def gerar_html(alvo: str, resultados: list[dict],
         <div class="card"><div class="n" style="color:#3fb950">{c['BAIXA']}</div><div class="l">Baixos</div></div>
     </div>
 """
+
+    # ---- Mudanças desde o último scan (diff) ----
+    html_doc += _secao_diff(diff)
 
     # ---- Corrija primeiro ----
     if resumo["top_cves"]:

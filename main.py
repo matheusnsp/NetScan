@@ -42,6 +42,8 @@ from scanner.misconfig import checar_porta
 from scanner.port_scanner import scan_ports_fast
 from scanner.scoring import resumir
 from scanner.service_detect import detectar_servico
+from scanner.snapshot import (carregar_snapshot, comparar, diff_para_jsonl,
+                              salvar_snapshot)
 from scanner.targets import parse_alvos, parse_portas
 from scanner.vuln_checker import buscar_vulnerabilidades
 
@@ -184,7 +186,7 @@ def escanear_alvo(alvo: str, portas: list[int], timeout: float, threads: int,
 
 
 def salvar_relatorios(alvo: str, resultados: list[dict], achados_config: list[dict],
-                      formatos: list[str], saida: Path) -> list[Path]:
+                      formatos: list[str], saida: Path, diff: dict | None = None) -> list[Path]:
     """Gera os relatórios nos formatos pedidos. Retorna os caminhos criados."""
     saida.mkdir(parents=True, exist_ok=True)
     # Não usar with_suffix: um alvo como "127.0.0.1" tem pontos e seria truncado.
@@ -193,7 +195,7 @@ def salvar_relatorios(alvo: str, resultados: list[dict], achados_config: list[di
     criados = []
     if "html" in formatos:
         p = Path(base + ".html")
-        p.write_text(gerar_html(alvo, resultados, achados_config), encoding="utf-8")
+        p.write_text(gerar_html(alvo, resultados, achados_config, diff), encoding="utf-8")
         criados.append(p)
     if "json" in formatos:
         p = Path(base + ".json")
@@ -201,13 +203,43 @@ def salvar_relatorios(alvo: str, resultados: list[dict], achados_config: list[di
         criados.append(p)
     if "jsonl" in formatos:
         p = Path(base + ".jsonl")
-        gerar_jsonl(alvo, resultados, str(p), achados_config)
+        gerar_jsonl(alvo, resultados, str(p), achados_config,
+                    diff_para_jsonl(alvo, diff) if diff else None)
         criados.append(p)
     if "csv" in formatos:
         p = Path(base + ".csv")
         gerar_csv(resultados, str(p))
         criados.append(p)
     return criados
+
+
+def imprimir_diff(diff: dict | None):
+    """Imprime o painel 'mudanças desde o último scan' quando houver."""
+    if not diff or diff.get("primeira_vez"):
+        if diff and diff.get("primeira_vez"):
+            console.print("[dim]Primeiro scan deste alvo — snapshot salvo como linha de base.[/]")
+        return
+    if not diff.get("houve_mudanca"):
+        console.print("[dim]Sem mudanças desde o último scan.[/]")
+        return
+
+    linhas = []
+    for p in diff["portas_novas"]:
+        linhas.append(f"[bold green]+ porta {p} ABRIU[/]")
+    for p in diff["portas_fechadas"]:
+        linhas.append(f"[dim]- porta {p} fechou[/]")
+    for porta, antes, agora in diff["servicos_alterados"]:
+        linhas.append(f"[yellow]~ porta {porta}: {antes or '—'} → {agora or '—'}[/]")
+    kev_set = set(diff.get("kev_novos", []))
+    for porta, cid in diff["cves_novos"]:
+        marca = " [bold red](KEV)[/]" if (porta, cid) in kev_set else ""
+        linhas.append(f"[red]! CVE novo em {porta}: {cid}{marca}[/]")
+    for a in diff["config_novos"]:
+        linhas.append(f"[magenta]! config: {a.get('titulo')} (porta {a.get('porta')})[/]")
+
+    console.print(Panel("\n".join(linhas),
+                        title="[bold]🔔 Mudanças desde o último scan[/]",
+                        border_style="yellow", expand=False))
 
 
 # ----------------------------- MODO DEMONSTRAÇÃO -----------------------------
@@ -285,6 +317,8 @@ def construir_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-vuln", action="store_true", help="não consultar CVEs (só portas/serviços)")
     p.add_argument("--no-config", action="store_true", help="pular checagens de má configuração")
     p.add_argument("--demo", action="store_true", help="modo demonstração (cenário fictício, CVEs reais)")
+    p.add_argument("--no-diff", action="store_true", help="não comparar com o scan anterior")
+    p.add_argument("--state-dir", help="diretório dos snapshots (padrão: ~/.local/share/netscan)")
     p.add_argument("--log", help="arquivo de log (opcional)")
     p.add_argument("-q", "--quiet", action="store_true", help="menos saída no terminal")
     return p
@@ -311,6 +345,7 @@ def rodar_cli(args) -> int:
         console.print(f"[bold red]Erro:[/] {e}")
         return 2
 
+    state_dir = Path(args.state_dir) if args.state_dir else None
     log.info("iniciando scan de %d alvo(s) em %d porta(s)", len(alvos), len(portas))
     for alvo in alvos:
         resultados, config = escanear_alvo(
@@ -320,11 +355,20 @@ def rodar_cli(args) -> int:
         if not resultados and not config:
             console.print(f"[dim]{alvo}: nenhuma porta aberta.[/]")
             continue
-        criados = salvar_relatorios(alvo, resultados, config, formatos, saida)
+
+        diff = None
+        if not args.no_diff:
+            diff = comparar(carregar_snapshot(alvo, state_dir), resultados, config)
+            salvar_snapshot(alvo, resultados, config, state_dir)
+            if not args.quiet:
+                imprimir_diff(diff)
+
+        criados = salvar_relatorios(alvo, resultados, config, formatos, saida, diff)
         imprimir_veredito(resultados, config)
         console.print(f"[green]✓[/] {alvo}: {', '.join(str(c) for c in criados)}\n")
-        log.info("%s: %d portas, %d cves, %d config", alvo,
-                 len(resultados), sum(len(r['cves']) for r in resultados), len(config))
+        log.info("%s: %d portas, %d cves, %d config, mudanca=%s", alvo,
+                 len(resultados), sum(len(r['cves']) for r in resultados), len(config),
+                 bool(diff and diff.get("houve_mudanca")))
     return 0
 
 
@@ -354,7 +398,12 @@ def rodar_interativo() -> int:
                 print("Número inválido.")
         resultados, config = escanear_alvo(alvo, parse_portas("1-1024"), 1.5, 100)
 
-    criados = salvar_relatorios(alvo, resultados, config, ["html", "json", "csv"], Path("."))
+    # Diff com o scan anterior do mesmo alvo.
+    diff = comparar(carregar_snapshot(alvo), resultados, config)
+    salvar_snapshot(alvo, resultados, config)
+    imprimir_diff(diff)
+
+    criados = salvar_relatorios(alvo, resultados, config, ["html", "json", "csv"], Path("."), diff)
     imprimir_veredito(resultados, config)
     console.print(Panel("\n".join(f"[green]✓[/] {c}" for c in criados),
                         title="[bold]\U0001F4C1 Relatórios[/]", border_style="green", expand=False))

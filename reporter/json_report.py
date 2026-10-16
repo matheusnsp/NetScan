@@ -23,11 +23,12 @@ def gerar_json(alvo: str, resultados: list[dict], caminho: str,
 
 
 def gerar_jsonl(alvo: str, resultados: list[dict], caminho: str,
-                achados_config: list[dict] | None = None):
+                achados_config: list[dict] | None = None,
+                eventos_extra: list[dict] | None = None):
     """Exporta em JSON Lines (um evento por linha) para ingestão em SIEM.
 
-    Cada CVE e cada achado de configuração vira uma linha independente — formato
-    que Wazuh/Splunk/Elastic consomem direto.
+    Cada CVE, cada achado de configuração e cada mudança de scan (diff) vira uma
+    linha independente — formato que Wazuh/Splunk/Elastic consomem direto.
     """
     achados_config = achados_config or []
     with open(caminho, "w", encoding="utf-8") as f:
@@ -41,3 +42,5 @@ def gerar_jsonl(alvo: str, resultados: list[dict], caminho: str,
         for a in achados_config:
             f.write(json.dumps({"alvo": alvo, "tipo": "config", **a},
                                ensure_ascii=False, default=str) + "\n")
+        for ev in (eventos_extra or []):
+            f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")

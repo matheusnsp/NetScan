@@ -13,3 +13,13 @@ __pycache__/
 
 # Arquivo temporário de testes
 teste.py
+
+# Relatórios gerados pelos scans — saída, não código
+relatorio_*.html
+relatorio_*.json
+relatorio_*.jsonl
+relatorio_*.csv
+
+# Cache local (CVEs/KEV/EPSS) e snapshots de diff, se gerados dentro do repo
+.cache/
+snapshots/

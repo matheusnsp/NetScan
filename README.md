@@ -14,7 +14,8 @@ Desenvolvido para fins **educacionais** e de **pentest autorizado**.
 4. **Checagem de vulnerabilidades** — cruza serviço+versão com a NVD **por CPE** (muito menos falso-positivo que busca por palavra-chave), com timeout, tratamento de rate limit e **cache local**.
 5. **Priorização** — enriquece cada CVE com **CISA KEV** (exploração ativa) e **EPSS** (probabilidade de exploração), e calcula um **score de risco** por host.
 6. **Má configuração** — Redis/MongoDB sem autenticação, FTP anônimo, Telnet exposto, TLS obsoleto/expirado, cabeçalhos de segurança HTTP ausentes.
-7. **Relatórios** — HTML (com resumo executivo e "corrija primeiro"), JSON, **JSON Lines (para SIEM)** e CSV.
+7. **Diff entre scans** — compara o scan atual com o anterior do mesmo alvo e aponta o que mudou: portas que abriram/fecharam, serviço/versão alterado, CVEs e KEV novos, nova má configuração. É o modo de monitoramento — "a porta 3389 abriu no host X desde ontem".
+8. **Relatórios** — HTML (com resumo executivo, "corrija primeiro" e seção de mudanças), JSON, **JSON Lines (para SIEM)** e CSV.
 
 > As checagens de má configuração são **de leitura e não-destrutivas**: verificam a *postura* do serviço (exige senha? certificado válido?), sem alterar dados nem explorar nada — o equivalente a conferir se a porta está trancada.
 
@@ -52,6 +53,10 @@ python3 main.py 10.0.0.5 --format jsonl -o ./relatorios
 
 # Demonstração (cenário fictício, CVEs reais da NVD)
 python3 main.py --demo
+
+# Monitoramento: rode o mesmo alvo periodicamente — o 2º scan em diante
+# mostra "o que mudou desde o último" (portas novas, CVEs novos, KEV, config)
+python3 main.py 192.168.0.10 --ports top100
 ```
 
 Principais opções:
@@ -65,6 +70,8 @@ Principais opções:
 | `--threads` | threads de varredura | `100` |
 | `--no-vuln` | só portas/serviços, sem NVD | — |
 | `--no-config` | pula checagens de má configuração | — |
+| `--no-diff` | não compara com o scan anterior | — |
+| `--state-dir` | onde guardar os snapshots do diff | `~/.local/share/netscan` |
 | `--log` | arquivo de log | — |
 | `-q, --quiet` | menos saída no terminal | — |
 
@@ -100,6 +107,7 @@ netscan/
 │   ├── enrich.py            # CISA KEV + EPSS
 │   ├── misconfig.py         # checagens de má configuração (não-destrutivas)
 │   ├── scoring.py           # priorização e resumo executivo
+│   ├── snapshot.py          # diff entre scans (monitoramento)
 │   ├── targets.py           # perfis de porta e alvos (CIDR/arquivo)
 │   ├── host_discovery.py    # descoberta de hosts (ARP + TCP)
 │   └── mac_lookup.py        # fabricante pelo MAC
@@ -137,7 +145,7 @@ Fontes de dados: **NVD/NIST** (CVE por CPE), **CISA KEV** (exploração ativa), 
 
 ## 🗺️ Melhorias futuras
 
-- [ ] Diff entre scans (alertar porta/serviço que surgiu desde a última varredura)
+- [x] Diff entre scans (alertar porta/serviço/CVE que surgiu desde a última varredura)
 - [ ] Exportação para PDF
 - [ ] Varredura UDP
 - [ ] Interface web (Flask/FastAPI)
