@@ -36,8 +36,10 @@ from reporter.csv_report import gerar_csv
 from reporter.html_report import gerar_html
 from reporter.json_report import gerar_json, gerar_jsonl
 from scanner.enrich import enriquecer
-from scanner.host_discovery import read_arp_table
-from scanner.mac_lookup import buscar_fabricante
+from concurrent.futures import ThreadPoolExecutor
+
+from scanner.host_discovery import read_arp_table, reverse_dns
+from scanner.mac_lookup import buscar_fabricante, mac_aleatorio
 from scanner.misconfig import checar_porta
 from scanner.port_scanner import scan_ports_fast
 from scanner.scoring import resumir
@@ -277,14 +279,44 @@ def escanear_demo(host: dict) -> tuple[list[dict], list[dict]]:
 
 def listar_hosts():
     aparelhos = read_arp_table()
-    console.print("[bold yellow][*][/] Descobrindo aparelhos (ARP)...\n")
-    tabela = Table(border_style="cyan", title="Aparelhos na rede", title_style="bold")
-    for col, st in [("#", "bold yellow"), ("IP", "cyan"), ("MAC", "dim"), ("Fabricante", "white")]:
-        tabela.add_column(col, style=st, justify="center" if col == "#" else "left")
-    for i, ap in enumerate(aparelhos, start=1):
+    console.print("[bold yellow][*][/] Descobrindo aparelhos (ARP + DNS reverso)...\n")
+
+    # Enriquecimento concorrente: fabricante (OUI) e nome por DNS reverso.
+    def _enriquecer(ap):
         ap["fabricante"] = buscar_fabricante(ap["mac"])
-        tabela.add_row(str(i), ap["ip"], ap["mac"], ap["fabricante"])
+        ap["hostname"] = ap.get("hostname_arp") or reverse_dns(ap["ip"])
+        ap["aleatorio"] = mac_aleatorio(ap["mac"])
+        return ap
+
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        aparelhos = list(ex.map(_enriquecer, aparelhos))
+
+    tabela = Table(border_style="cyan", title="Aparelhos na rede", title_style="bold")
+    tabela.add_column("#", style="bold yellow", justify="center")
+    tabela.add_column("IP", style="cyan")
+    tabela.add_column("Nome (DNS)", style="white")
+    tabela.add_column("MAC", style="dim")
+    tabela.add_column("Tipo", style="white", justify="center")
+    tabela.add_column("Fabricante", style="white")
+    tabela.add_column("Iface", style="dim", justify="center")
+
+    for i, ap in enumerate(aparelhos, start=1):
+        tipo = "[yellow]aleatório[/]" if ap["aleatorio"] else "[green]público[/]"
+        nome = ap.get("hostname") or "[dim]—[/]"
+        fab = ap["fabricante"]
+        if fab == "Aleatório (privacidade)":
+            fab = "[dim]— (MAC privado)[/]"
+        elif fab == "Desconhecido":
+            fab = "[dim]Desconhecido[/]"
+        tabela.add_row(str(i), ap["ip"], nome, ap["mac"], tipo, fab,
+                       ap.get("interface") or "—")
+
     console.print(tabela)
+    n_aleatorios = sum(1 for a in aparelhos if a["aleatorio"])
+    if n_aleatorios:
+        console.print(
+            f"[dim]ℹ {n_aleatorios} de {len(aparelhos)} usam MAC aleatório "
+            f"(privacidade) — sem fabricante público; normal em celulares/notebooks.[/]\n")
     return aparelhos
 
 

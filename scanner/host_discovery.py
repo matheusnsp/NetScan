@@ -3,6 +3,26 @@ import subprocess
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from scanner.mac_lookup import normalizar_mac
+
+
+def reverse_dns(ip: str, timeout: float = 1.0) -> str | None:
+    """Tenta descobrir o nome do host por DNS reverso. None se não resolver.
+
+    Muitos aparelhos de rede local respondem com um nome útil
+    (ex.: 'Galaxy-S23.lan', 'amazon-abc.lan'), dando uma pista do dispositivo.
+    """
+    antigo = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+    try:
+        nome = socket.gethostbyaddr(ip)[0]
+        # Ignora quando o PTR só devolve o próprio IP.
+        return None if nome == ip else nome
+    except (OSError, socket.herror):
+        return None
+    finally:
+        socket.setdefaulttimeout(antigo)
+
 
 def is_host_alive(host: str, port: int, timeout: float = 1.0) -> bool:
     """
@@ -60,24 +80,34 @@ def read_arp_table() -> list[dict]:
     resultado = subprocess.run(["arp", "-a"], capture_output=True, text=True)
     saida = resultado.stdout                     # o texto que o comando imprimiu
 
-    # Regex que captura (IP) e (MAC) de cada linha. As linhas "incomplete"
-    # não têm MAC válido, então nem casam com o padrão -> são ignoradas sozinhas.
-    #   \(...\)        -> os parênteses literais em volta do IP
-    #   (\d+\.\d+...)  -> grupo 1: captura o IP
-    #   ([0-9a-fA-F:]+)-> grupo 2: captura o MAC
-    padrao = r"\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-fA-F:]+)"
-    resultados = re.findall(padrao, saida)       # lista de tuplas (ip, mac)
+    # Regex por linha. Captura, quando houver: nome do host (antes do IP),
+    # o IP, o MAC e a interface (o 'on en0' do macOS/BSD).
+    #   ^(\S+)                -> grupo 1: nome do host no arp ('?' quando não há)
+    #   \((IP)\) at (MAC)     -> grupos 2 e 3
+    #   (?: on (\S+))?        -> grupo 4: interface, opcional
+    padrao = re.compile(
+        r"^(\S+) \((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-fA-F:]+)(?: on (\S+))?"
+    )
 
-    # Monta uma lista de dicionários, descartando o que não é aparelho real:
-    # broadcast (.255) e multicast (224.x.x.x).
     aparelhos = []
-    for ip, mac in resultados:                   # desempacota cada tupla em ip e mac
-        if ip.endswith(".255"):                  # broadcast, não é um aparelho
-            continue                             # "continue" pula pro próximo item do loop
-        if mac == "ff:ff:ff:ff:ff:ff":           # MAC de broadcast
+    for linha in saida.splitlines():
+        m = padrao.match(linha.strip())
+        if not m:
             continue
-        if ip.startswith("224."):                # faixa multicast, não é aparelho
+        nome_arp, ip, mac, interface = m.groups()
+        mac = normalizar_mac(mac)
+
+        if ip.endswith(".255") or ip.startswith("224."):
+            continue                             # broadcast/multicast, não é aparelho
+        if mac == "ff:ff:ff:ff:ff:ff":
             continue
-        aparelhos.append({"ip": ip, "mac": mac})
+
+        aparelhos.append({
+            "ip": ip,
+            "mac": mac,
+            # Nome vindo do próprio arp (às vezes '?'), tratado no front.
+            "hostname_arp": None if nome_arp in ("?", "") else nome_arp,
+            "interface": interface,
+        })
 
     return aparelhos
