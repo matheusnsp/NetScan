@@ -2,31 +2,33 @@ import csv
 
 
 def gerar_csv(resultados: list[dict], caminho: str):
-    """Salva os resultados em CSV, uma linha por CVE (achatado)."""
+    """Salva os resultados em CSV, uma linha por CVE (achatado).
 
-    # Define as colunas do CSV
-    colunas = ["porta", "servico", "cve_id", "score"]
+    Colunas novas: severidade, kev e epss, para priorização direto na planilha.
+    """
+    colunas = ["porta", "servico", "cve_id", "score", "severidade", "kev", "epss"]
 
     with open(caminho, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=colunas)
-        writer.writeheader()   # escreve a linha de cabeçalho com os nomes das colunas
+        writer.writeheader()
 
-        # Percorre cada porta
         for r in resultados:
-            if r["cves"]:
-                # Uma linha por CVE da porta
+            if r.get("cves"):
                 for v in r["cves"]:
+                    epss = v.get("epss")
                     writer.writerow({
                         "porta": r["porta"],
-                        "servico": r["servico"],
+                        "servico": r.get("servico"),
                         "cve_id": v["id"],
-                        "score": v["score"]
+                        "score": v.get("score"),
+                        "severidade": v.get("severidade"),
+                        "kev": "sim" if v.get("kev") else "",
+                        "epss": f"{epss:.4f}" if epss is not None else "",
                     })
             else:
-                # Porta sem CVE: ainda registra uma linha, com CVE vazio
                 writer.writerow({
                     "porta": r["porta"],
-                    "servico": r["servico"],
-                    "cve_id": "",
-                    "score": ""
+                    "servico": r.get("servico"),
+                    "cve_id": "", "score": "", "severidade": "",
+                    "kev": "", "epss": "",
                 })
