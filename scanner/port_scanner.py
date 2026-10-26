@@ -50,58 +50,49 @@ def scan_port(host: str, port: int, timeout: float = 1.0) -> bool:
         return result == 0
     
 
-def scan_ports_fast(host: str, start_port: int, end_port: int,
-                    timeout: float = 1.0, max_threads: int = 100) -> list[int]:
+def scan_port_list(host: str, ports, timeout: float = 1.0,
+                   max_threads: int = 100) -> list[int]:
     """
+    Escaneia APENAS as portas da lista, em paralelo, usando um pool de threads.
 
-    Escaneira um range de portas em paralelo usando um pool threads.
+    É o que a CLI usa: um perfil como "top100" ou "22,80,443" é esparso, e
+    varrer o intervalo contíguo entre a menor e a maior porta (7..54321 no
+    top100) custaria dezenas de milhares de conexões em vez de ~100.
 
     Parâmetros:
         host        -> o IP/host alvo
-        start_port  -> primeira porta do range (inclusive)
-        end_port    -> última porta do range (inclusive)
-        timeout     -> timeout por porta, repassando pra scan_port
+        ports       -> qualquer iterável de portas (repetições são ignoradas)
+        timeout     -> timeout por porta, repassado pra scan_port
         max_threads -> quantas threads no máximo trabalham ao mesmo tempo
 
     Retorna:
         Uma lista ordenada com os números das portas abertas.
-    
     """
+    portas = sorted(set(ports))
+    if not portas:
+        return []
 
-    # Lista onde vamos juntar as portas abertas conforme forem descobertas.
     abertas = []
+    with ThreadPoolExecutor(max_workers=min(max_threads, len(portas))) as executor:
+        # Uma tarefa por porta pedida. Guardamos { future: porta } pra saber
+        # qual porta cada resultado representa.
+        futures = {executor.submit(scan_port, host, port, timeout): port
+                   for port in portas}
 
-    # Criamos o pool de threads. O "with" garante que o pool seja
-    # encerrado corretamente no fim (espera as threads e libera recursos).
-    # max_workers = teto de threads rodando simultaneamente.
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
-        # ---- PASSO 1: agendar uma tarefa por porta ----
-        # Para cada porta do range, pedimos ao executor pra rodar
-        # scan_port(host, porta, timeout) em ALGUMA thread do pool.
-
-        #  executor.submit NÃO espera o resultado. Ele agenda a tarefa
-        # e devolve na hora um objeto "Future" - uma espécie de 
-        # "comprovante"que mais tarde conterá o resultado.
-
-        # Guardamos esses Futures num dicionário { future: porta },
-        # pra depois sabermos qual porta cada resultado representa.
-        futures = {
-            executor.submit(scan_port, host, port, timeout,): port
-            for port in range(start_port, end_port + 1)
-        }
-
-        # ---- PASSO 2: colher os resultados conforme ficam prontos ----
-        # as_completed devolve os Futures NA ORDEM em que TERMINAM
-        # (não na ordem em que foram criados). Ou seja, o resultado
-        # da primeira porta que responder chega primeiro.
+        # as_completed devolve os Futures na ordem em que TERMINAM.
         for future in as_completed(futures):
-            # Recuperamos qual porta era este Future, usando o dicionário.
-            port = futures[future]
-
-            # future.result() devolve o que scan_port retornou (True/False).
             if future.result():
-                abertas.append(port)
-    
-    # Ordenamos antes de retornar, porque as_completed bagunça a ordem
-    # (a porta 900 pode ter respondido antes da porta 50).
+                abertas.append(futures[future])
+
+    # Ordenamos porque as_completed bagunça a ordem.
     return sorted(abertas)
+
+
+def scan_ports_fast(host: str, start_port: int, end_port: int,
+                    timeout: float = 1.0, max_threads: int = 100) -> list[int]:
+    """
+    Escaneia um range contíguo de portas (start_port..end_port, inclusive).
+
+    Atalho para scan_port_list(host, range(start_port, end_port + 1), ...).
+    """
+    return scan_port_list(host, range(start_port, end_port + 1), timeout, max_threads)

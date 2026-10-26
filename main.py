@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 from scanner.host_discovery import read_arp_table, reverse_dns
 from scanner.mac_lookup import buscar_fabricante, mac_aleatorio
 from scanner.misconfig import checar_porta
-from scanner.port_scanner import scan_ports_fast
+from scanner.port_scanner import scan_port_list
 from scanner.scoring import resumir
 from scanner.service_detect import detectar_servico
 from scanner.snapshot import (carregar_snapshot, comparar, diff_para_jsonl,
@@ -131,12 +131,9 @@ def escanear_alvo(alvo: str, portas: list[int], timeout: float, threads: int,
         console.print(painel_alvo(alvo, portas=f"{len(portas)} porta(s)"))
         console.print("\n[bold yellow][*][/] Varredura de portas...")
 
-    porta_min, porta_max = min(portas), max(portas)
-    # scan_ports_fast varre um range contíguo; para perfis esparsos (top100),
-    # varremos o range e filtramos pelo conjunto pedido.
-    abertas_range = scan_ports_fast(alvo, porta_min, porta_max, timeout, threads)
-    conjunto = set(portas)
-    portas_abertas = [p for p in abertas_range if p in conjunto]
+    # Só as portas pedidas: um perfil esparso como top100 (7..54321) tem 100
+    # portas, não 54 mil — varrer o intervalo inteiro levava minutos à toa.
+    portas_abertas = scan_port_list(alvo, portas, timeout, threads)
 
     if narrar:
         console.print(f"[bold green][+][/] {len(portas_abertas)} aberta(s): [cyan]{portas_abertas}[/]\n")
