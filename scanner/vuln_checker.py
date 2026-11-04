@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -112,57 +113,118 @@ def _extrair_cve(item: dict) -> dict:
     }
 
 
-def buscar_vulnerabilidades(
-    produto: str,
-    versao: str | None = None,
-    timeout: float = 15.0,
-    max_cves: int = 25,
-) -> list[dict]:
-    """Retorna os CVEs da NVD para um produto+versão, via CPE.
+# Limites públicos da NVD: ~5 requisições/30 s sem chave e ~50/30 s com chave.
+# Espaçamos as consultas para nunca estourar, em vez de descobrir pelo 429.
+INTERVALO_SEM_CHAVE = 6.0
+INTERVALO_COM_CHAVE = 0.6
+TENTATIVAS = 3
+_ultima_consulta = 0.0
+_lock_ritmo = threading.Lock()
 
-    Se o produto não estiver no CPE_MAP ou não houver versão, cai para uma busca
-    por palavra-chave mais estrita (produto + versão), ainda melhor que a antiga.
-    Aceita também a chamada antiga com um único termo (ex: "Apache 2.4.49").
-    """
+
+def _aguardar_vez(com_chave: bool) -> None:
+    """Respeita o intervalo mínimo entre consultas à NVD (thread-safe)."""
+    global _ultima_consulta
+    intervalo = INTERVALO_COM_CHAVE if com_chave else INTERVALO_SEM_CHAVE
+    with _lock_ritmo:
+        espera = _ultima_consulta + intervalo - time.monotonic()
+        if espera > 0:
+            time.sleep(espera)
+        _ultima_consulta = time.monotonic()
+
+
+def _espera_retry_after(resp, padrao: float) -> float:
+    try:
+        return min(float(resp.headers.get("Retry-After", padrao)), 60.0)
+    except (TypeError, ValueError):
+        return padrao
+
+
+def _montar_consulta(produto: str, versao: str | None):
+    """Devolve (chave_de_cache, parametros) ou (None, None) se não há o que buscar."""
     if versao is None and produto and " " in produto:
         # Compatibilidade retroativa: "Apache 2.4.49" -> ("Apache", "2.4.49")
         partes = produto.rsplit(" ", 1)
-        if partes[1][0].isdigit():
+        if partes[1][:1].isdigit():
             produto, versao = partes[0], partes[1]
 
     cpe = montar_cpe(produto, versao)
     if cpe and versao:
-        chave = f"cpe::{cpe}"
-        parametros = {"cpeName": cpe}
-    else:
-        termo = f"{produto} {versao}".strip() if versao else (produto or "").strip()
-        if not termo:
-            return []
-        chave = f"kw::{termo}"
-        parametros = {"keywordSearch": termo}
+        return f"cpe::{cpe}", {"cpeName": cpe}
+    termo = f"{produto} {versao}".strip() if versao else (produto or "").strip()
+    if not termo:
+        return None, None
+    return f"kw::{termo}", {"keywordSearch": termo}
+
+
+def consultar_cves(produto: str, versao: str | None = None,
+                   timeout: float = 15.0) -> dict:
+    """Consulta a NVD e devolve TODOS os CVEs do produto+versão, com status.
+
+    Retorna:
+        {"cves": [...ordenados por CVSS...], "erro": None | "mensagem"}
+
+    Uma falha (rate limit, NVD fora do ar, sem rede) NÃO vira "zero CVEs":
+    vem em "erro", para o relatório marcar a checagem como incompleta.
+    """
+    chave, parametros = _montar_consulta(produto, versao)
+    if chave is None:
+        return {"cves": [], "erro": None}
 
     cacheado = _cache_get(chave)
     if cacheado is not None:
-        return cacheado[:max_cves]
+        return {"cves": cacheado, "erro": None}
 
     headers = {}
     nvd_key = os.getenv("NVD_API_KEY")
     if nvd_key:
         headers["apiKey"] = nvd_key
 
-    try:
-        resp = requests.get(NVD_URL, params=parametros, headers=headers, timeout=timeout)
-        if resp.status_code == 429:  # rate limit
-            time.sleep(6)
+    erro = "falha desconhecida"
+    for tentativa in range(TENTATIVAS):
+        _aguardar_vez(bool(nvd_key))
+        try:
             resp = requests.get(NVD_URL, params=parametros, headers=headers, timeout=timeout)
-        if resp.status_code != 200:
-            return []
-        dados = resp.json()
-    except (requests.RequestException, ValueError):
-        return []
+        except requests.Timeout:
+            # NVD pendurada: não insiste (cada tentativa custaria `timeout` s).
+            return {"cves": [], "erro": f"NVD não respondeu em {timeout:.0f}s"}
+        except requests.RequestException as e:
+            erro = f"sem conexão com a NVD ({type(e).__name__})"
+            time.sleep(2 ** tentativa)
+            continue
 
-    cves = [_extrair_cve(it) for it in dados.get("vulnerabilities", [])]
-    # Ordena por score desc (None por último), para o relatório já sair priorizado.
-    cves.sort(key=lambda c: (c["score"] is not None, c["score"] or 0), reverse=True)
-    _cache_set(chave, cves)
-    return cves[:max_cves]
+        if resp.status_code == 200:
+            try:
+                dados = resp.json()
+                cves = [_extrair_cve(it) for it in dados.get("vulnerabilities", [])]
+            except (ValueError, KeyError, IndexError, TypeError):
+                return {"cves": [], "erro": "resposta inválida da NVD"}
+            # Ordena por score desc (None por último).
+            cves.sort(key=lambda c: (c["score"] is not None, c["score"] or 0), reverse=True)
+            _cache_set(chave, cves)
+            return {"cves": cves, "erro": None}
+
+        if resp.status_code in (403, 429) or resp.status_code >= 500:
+            # 403/429 = limite de requisições; 5xx = instabilidade.
+            erro = f"NVD respondeu HTTP {resp.status_code}"
+            time.sleep(_espera_retry_after(resp, 6.0 * (tentativa + 1)))
+            continue
+
+        # 4xx restante: consulta inválida, não adianta repetir.
+        return {"cves": [], "erro": f"NVD respondeu HTTP {resp.status_code}"}
+
+    return {"cves": [], "erro": erro}
+
+
+def buscar_vulnerabilidades(
+    produto: str,
+    versao: str | None = None,
+    timeout: float = 15.0,
+    max_cves: int | None = 25,
+) -> list[dict]:
+    """Forma simples (só a lista), mantida por compatibilidade.
+
+    Prefira consultar_cves(), que também informa se a consulta falhou.
+    """
+    cves = consultar_cves(produto, versao, timeout)["cves"]
+    return cves[:max_cves] if max_cves else cves

@@ -31,8 +31,8 @@ KEV_CACHE = CACHE_DIR / "kev.json"
 KEV_TTL = 60 * 60 * 24  # 1 dia
 
 
-def carregar_kev(timeout: float = 20.0) -> set[str]:
-    """Retorna o conjunto de CVE-IDs no catálogo KEV da CISA. Set vazio se falhar."""
+def carregar_kev(timeout: float = 20.0) -> set[str] | None:
+    """Retorna o conjunto de CVE-IDs no catálogo KEV da CISA. None se falhar."""
     if KEV_CACHE.exists() and (time.time() - KEV_CACHE.stat().st_mtime) < KEV_TTL:
         try:
             return set(json.loads(KEV_CACHE.read_text()))
@@ -42,8 +42,8 @@ def carregar_kev(timeout: float = 20.0) -> set[str]:
         resp = requests.get(KEV_URL, timeout=timeout)
         resp.raise_for_status()
         ids = [v["cveID"] for v in resp.json().get("vulnerabilities", [])]
-    except (requests.RequestException, ValueError, KeyError):
-        return set()
+    except (requests.RequestException, ValueError, KeyError, TypeError):
+        return None
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         KEV_CACHE.write_text(json.dumps(ids))
@@ -52,14 +52,15 @@ def carregar_kev(timeout: float = 20.0) -> set[str]:
     return set(ids)
 
 
-def buscar_epss(cve_ids: list[str], timeout: float = 20.0) -> dict[str, float]:
-    """Retorna {cve_id: probabilidade_epss} para a lista dada. {} se falhar.
+def buscar_epss(cve_ids: list[str], timeout: float = 20.0) -> dict[str, float] | None:
+    """Retorna {cve_id: probabilidade_epss} para a lista dada. None se TODOS os lotes falharem.
 
     A API aceita até ~100 CVEs por chamada, separados por vírgula.
     """
     if not cve_ids:
         return {}
     scores: dict[str, float] = {}
+    falhas = 0
     for i in range(0, len(cve_ids), 100):
         lote = cve_ids[i : i + 100]
         try:
@@ -69,21 +70,25 @@ def buscar_epss(cve_ids: list[str], timeout: float = 20.0) -> dict[str, float]:
             resp.raise_for_status()
             for item in resp.json().get("data", []):
                 scores[item["cve"]] = float(item["epss"])
-        except (requests.RequestException, ValueError, KeyError):
-            continue  # lote falhou; segue com o que já tem
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            falhas += 1  # lote falhou; segue com o que já tem
+    if falhas and not scores:
+        return None
     return scores
 
 
-def enriquecer(resultados: list[dict]) -> list[dict]:
+def enriquecer(resultados: list[dict]) -> dict:
     """Anota cada CVE de cada porta com `kev` (bool) e `epss` (float|None).
 
-    Recebe e devolve a mesma estrutura de resultados usada pelo resto do app.
+    Altera `resultados` no lugar e devolve o status das fontes:
+        {"kev_ok": bool, "epss_ok": bool}
+    Uma fonte fora do ar não derruba o scan, mas o status permite avisar.
     """
     todos_ids = [
         v["id"] for r in resultados for v in r.get("cves", []) if v.get("id")
     ]
     if not todos_ids:
-        return resultados
+        return {"kev_ok": True, "epss_ok": True}
 
     kev = carregar_kev()
     epss = buscar_epss(sorted(set(todos_ids)))
@@ -91,6 +96,6 @@ def enriquecer(resultados: list[dict]) -> list[dict]:
     for r in resultados:
         for v in r.get("cves", []):
             cid = v.get("id")
-            v["kev"] = cid in kev
-            v["epss"] = epss.get(cid)
-    return resultados
+            v["kev"] = cid in (kev or set())
+            v["epss"] = (epss or {}).get(cid)
+    return {"kev_ok": kev is not None, "epss_ok": epss is not None}

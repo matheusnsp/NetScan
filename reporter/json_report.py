@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 
 from scanner.scoring import resumir
@@ -39,6 +41,11 @@ def gerar_jsonl(alvo: str, resultados: list[dict], caminho: str,
                     "servico": r.get("servico"), **v,
                 }
                 f.write(json.dumps(evento, ensure_ascii=False, default=str) + "\n")
+        for r in resultados:
+            if r.get("cve_erro"):
+                f.write(json.dumps({"alvo": alvo, "tipo": "aviso", "porta": r["porta"],
+                                    "aviso": "checagem_cve_incompleta",
+                                    "erro": r["cve_erro"]}, ensure_ascii=False) + "\n")
         for a in achados_config:
             f.write(json.dumps({"alvo": alvo, "tipo": "config", **a},
                                ensure_ascii=False, default=str) + "\n")

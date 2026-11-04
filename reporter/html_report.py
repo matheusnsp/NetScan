@@ -137,6 +137,16 @@ def gerar_html(alvo: str, resultados: list[dict],
     </div>
 """
 
+    # ---- Aviso: checagem de CVE incompleta ----
+    if resumo["checagem_cve_incompleta"]:
+        itens = "".join(f"<li>Porta {_esc(i['porta'])}: {_esc(i['erro'])}</li>"
+                        for i in resumo["checagem_cve_incompleta"])
+        html_doc += ("<div class='diff' style='border-left-color:#f85149'>"
+                     "<h2 style='margin-top:8px'>⚠️ Checagem de CVE incompleta</h2>"
+                     "<p>A consulta à NVD falhou nas portas abaixo. A ausência de "
+                     "CVEs nelas <strong>não</strong> significa que estão seguras.</p>"
+                     f"<ul>{itens}</ul></div>\n")
+
     # ---- Mudanças desde o último scan (diff) ----
     html_doc += _secao_diff(diff)
 
@@ -189,6 +199,12 @@ def gerar_html(alvo: str, resultados: list[dict],
                 )
         else:
             cves_html = "—"
+        total = r.get("cves_total", 0)
+        if total > len(r.get("cves", [])):
+            cves_html += (f"<span class='desc'>Mostrando {len(r['cves'])} de {total} "
+                          "(os mais prioritários; KEV → EPSS → CVSS).</span>")
+        if r.get("cve_erro"):
+            cves_html += f"<span style='color:#f85149'>⚠ NVD: {_esc(r['cve_erro'])}</span>"
         html_doc += (
             f"<tr><td>{_esc(r.get('porta'))}</td><td>{servico}</td>"
             f"<td>{cves_html}</td></tr>\n"

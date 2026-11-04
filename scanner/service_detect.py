@@ -111,12 +111,33 @@ def _casar_fingerprint(banner: str) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _e_http(banner: str | None) -> bool:
+    """Só é HTTP se a resposta COMEÇA com a linha de status 'HTTP/x.y'.
+
+    Outros serviços (ex.: Redis) ecoam o pedido num erro que contém "HTTP/1.0";
+    olhar só se o texto contém "HTTP/" gerava falso positivo.
+    """
+    return bool(banner) and banner.lstrip().upper().startswith("HTTP/")
+
+
+def _e_redis(banner: str | None) -> bool:
+    """Respostas de erro no protocolo do Redis (RESP) a um comando desconhecido."""
+    return bool(banner) and banner.startswith(("-ERR", "-NOAUTH", "-DENIED"))
+
+
+# INFO server é um comando de LEITURA do Redis: devolve só metadados
+# (versão, modo, uptime). Não lê chaves nem altera nada.
+PROBE_REDIS = b"INFO server\r\n"
+PROBE_HTTP = b"HEAD / HTTP/1.0\r\n\r\n"
+
+
 def detectar_servico(host: str, port: int, timeout: float = 2.0) -> dict | None:
     """Identifica o serviço de uma porta aberta.
 
-    1. Tenta o banner passivo (serviços que falam primeiro).
-    2. Se o palpite pela porta for HTTP/HTTPS, manda o probe web.
-    3. Casa o banner com os fingerprints.
+    1. Tenta o banner passivo (serviços que falam primeiro: SSH, FTP, SMTP...).
+    2. Se o palpite pela porta for HTTP/HTTPS/Redis, manda o probe certo.
+    3. Se ficou calado, tenta HTTP; se a resposta for de Redis, pede INFO.
+    4. Casa o banner com os fingerprints.
 
     Retorna o dicionário normalizado ou None se nada responder.
     """
@@ -127,22 +148,30 @@ def detectar_servico(host: str, port: int, timeout: float = 2.0) -> dict | None:
         banner = _recv_tls(host, port, timeout)
         proto = "https"
     elif palpite == "http":
-        banner = _recv(host, port, timeout, b"HEAD / HTTP/1.0\r\n\r\n")
-        proto = "http"
+        banner = _recv(host, port, timeout, PROBE_HTTP)
+        proto = "http" if _e_http(banner) else "tcp"
+    elif palpite == "redis":
+        banner = _recv(host, port, timeout, PROBE_REDIS)
+        proto = "redis"
     else:
-        # Serviços que se anunciam ao conectar (SSH, FTP, SMTP, MySQL, ...).
         banner = _recv(host, port, timeout)
         proto = palpite or "tcp"
-        # Se ficou calado, pode ser um HTTP que espera o pedido.
         if not banner:
-            banner = _recv(host, port, timeout, b"HEAD / HTTP/1.0\r\n\r\n")
-            if banner:
+            # Ficou calado: pode ser HTTP (espera o pedido) ou Redis.
+            banner = _recv(host, port, timeout, PROBE_HTTP)
+            if _e_http(banner):
                 proto = "http"
+            elif _e_redis(banner):
+                proto = "redis"
+                banner = _recv(host, port, timeout, PROBE_REDIS) or banner
 
     if not banner:
         return None
 
     produto, versao = _casar_fingerprint(banner)
+    if not produto and proto == "redis":
+        # Redis com senha responde -NOAUTH ao INFO: sabemos o produto, não a versão.
+        produto = "redis"
     return {
         "produto": produto,
         "versao": versao,

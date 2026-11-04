@@ -81,6 +81,16 @@ def resumir(resultados: list[dict], achados_config: list[dict] | None = None) ->
     )
     score = min(bruto, 100)
 
+    # Portas cuja consulta de CVE falhou (NVD fora do ar, rate limit...).
+    # Sem isso, "0 CVEs" seria lido como "seguro" quando na verdade não sabemos.
+    incompletas = [{"porta": r["porta"], "erro": r["cve_erro"]}
+                   for r in resultados if r.get("cve_erro")]
+    rotulo = rotulo_risco(score)
+    if incompletas and rotulo == "OK":
+        rotulo = "INDETERMINADO"
+    ocultos = sum(max(0, r.get("cves_total", 0) - len(r.get("cves", [])))
+                  for r in resultados)
+
     return {
         "total_portas": len(resultados),
         "total_cves": len(cves),
@@ -90,5 +100,7 @@ def resumir(resultados: list[dict], achados_config: list[dict] | None = None) ->
         "top_cves": top,
         "achados_config": achados_config,
         "score_risco": score,
-        "rotulo_risco": rotulo_risco(score),
+        "rotulo_risco": rotulo,
+        "checagem_cve_incompleta": incompletas,
+        "cves_nao_listados": ocultos,
     }

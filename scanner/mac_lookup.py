@@ -4,8 +4,8 @@ Identificação de dispositivo pelo MAC.
 Além de consultar o fabricante (OUI) numa API pública, este módulo trata dois
 detalhes que faziam TODOS os aparelhos virarem "Desconhecido" na prática:
 
-1. MAC sem zero à esquerda. O `arp` do macOS imprime "2:10:18:ed:70:60" em vez
-   de "02:10:18:ed:70:60". A API de fabricante não reconhece o formato curto.
+1. MAC sem zero à esquerda. O `arp` do macOS imprime "2:00:5e:10:20:30" em vez
+   de "02:00:5e:10:20:30". A API de fabricante não reconhece o formato curto.
    Aqui a gente normaliza cada octeto para 2 dígitos antes de consultar.
 
 2. MAC aleatório (privacidade). Celulares e notebooks modernos usam MAC
@@ -26,7 +26,7 @@ _cache: dict[str, str] = {}
 
 
 def normalizar_mac(mac: str) -> str:
-    """Zero-padda cada octeto: '2:10:18:ed:70:60' -> '02:10:18:ed:70:60'."""
+    """Zero-padda cada octeto: '2:00:5e:10:20:30' -> '02:00:5e:10:20:30'."""
     partes = mac.split(":")
     if len(partes) != 6:
         return mac.lower()

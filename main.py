@@ -9,7 +9,7 @@ Dois jeitos de usar:
        python3 main.py alvos.txt --ports 22,80,443 --no-vuln
        python3 main.py --demo
 
-  2. Menu interativo (sem argumentos), igual à versão anterior:
+  2. Menu interativo (sem argumentos), restrito a uma faixa que você informa:
        python3 main.py
 
 O fluxo por alvo: varre portas -> detecta serviço por protocolo -> cruza com
@@ -24,6 +24,7 @@ import argparse
 import logging
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from rich.align import Align
@@ -36,18 +37,17 @@ from reporter.csv_report import gerar_csv
 from reporter.html_report import gerar_html
 from reporter.json_report import gerar_json, gerar_jsonl
 from scanner.enrich import enriquecer
-from concurrent.futures import ThreadPoolExecutor
-
 from scanner.host_discovery import read_arp_table, reverse_dns
 from scanner.mac_lookup import buscar_fabricante, mac_aleatorio
 from scanner.misconfig import checar_porta
-from scanner.port_scanner import scan_port_list
-from scanner.scoring import resumir
+from scanner.port_scanner import LimitadorTaxa, descobrir_hosts, scan_port_list
+from scanner.scoring import prioridade_cve, resumir
 from scanner.service_detect import detectar_servico
 from scanner.snapshot import (carregar_snapshot, comparar, diff_para_jsonl,
                               salvar_snapshot)
-from scanner.targets import parse_alvos, parse_portas
-from scanner.vuln_checker import buscar_vulnerabilidades
+from scanner.targets import (e_privado, fora_do_escopo, parse_alvos,
+                             parse_escopo, parse_portas, resolver)
+from scanner.vuln_checker import consultar_cves
 
 console = Console()
 log = logging.getLogger("netscan")
@@ -105,11 +105,15 @@ def montar_tabela_resumo(resultados):
     for r in resultados:
         cves = r["cves"]
         servico = r["servico"] or "[dim]—[/]"
-        if cves:
+        if r.get("cve_erro"):
+            vuln_txt = Text("⚠ NVD indisponível", style="bold red")
+        elif cves:
             scores = [v["score"] for v in cves if v["score"] is not None]
             pior = max(scores) if scores else None
             kev = sum(1 for v in cves if v.get("kev"))
-            txt = f"{len(cves)} CVE(s)" + (f" · {kev} KEV" if kev else "")
+            total = r.get("cves_total", len(cves))
+            qtd = f"{len(cves)} de {total}" if total > len(cves) else str(len(cves))
+            txt = f"{qtd} CVE(s)" + (f" · {kev} KEV" if kev else "")
             vuln_txt = Text(txt, style=cor_severidade(pior))
         else:
             vuln_txt = Text("—", style="dim")
@@ -123,17 +127,33 @@ def _nome_servico(info: dict | None) -> str | None:
     return f"{info['produto']} {info['versao']}".strip() if info.get("versao") else info["produto"]
 
 
+def _priorizar_e_cortar(resultados: list[dict], max_cves: int | None) -> None:
+    """Ordena os CVEs de cada porta por prioridade (KEV → EPSS → CVSS) e corta.
+
+    O corte vem DEPOIS do enriquecimento: assim um CVE da KEV com CVSS médio
+    nunca some da lista por causa do limite.
+    """
+    for r in resultados:
+        r["cves"].sort(key=prioridade_cve, reverse=True)
+        if max_cves:
+            r["cves"] = r["cves"][:max_cves]
+
+
 def escanear_alvo(alvo: str, portas: list[int], timeout: float, threads: int,
                   buscar_cve: bool = True, checar_config: bool = True,
-                  narrar: bool = True) -> tuple[list[dict], list[dict]]:
-    """Escaneia UM alvo. Devolve (resultados_por_porta, achados_de_config)."""
+                  narrar: bool = True, limitador: LimitadorTaxa | None = None,
+                  max_cves: int | None = 25) -> tuple[list[dict], list[dict]]:
+    """Escaneia UM alvo. Devolve (resultados_por_porta, achados_de_config).
+
+    Lança ValueError se o alvo não resolver.
+    """
+    ip = resolver(alvo)  # uma consulta DNS só, não uma por porta
     if narrar:
-        console.print(painel_alvo(alvo, portas=f"{len(portas)} porta(s)"))
+        rotulo = alvo if ip == alvo else f"{alvo} ({ip})"
+        console.print(painel_alvo(rotulo, portas=f"{len(portas)} porta(s)"))
         console.print("\n[bold yellow][*][/] Varredura de portas...")
 
-    # Só as portas pedidas: um perfil esparso como top100 (7..54321) tem 100
-    # portas, não 54 mil — varrer o intervalo inteiro levava minutos à toa.
-    portas_abertas = scan_port_list(alvo, portas, timeout, threads)
+    portas_abertas = scan_port_list(ip, portas, timeout, threads, limitador)
 
     if narrar:
         console.print(f"[bold green][+][/] {len(portas_abertas)} aberta(s): [cyan]{portas_abertas}[/]\n")
@@ -142,21 +162,27 @@ def escanear_alvo(alvo: str, portas: list[int], timeout: float, threads: int,
     for porta in portas_abertas:
         if narrar:
             console.print(f"[bold yellow][*][/] Porta [cyan]{porta}[/]...")
-        info = detectar_servico(alvo, porta, timeout)
+        info = detectar_servico(ip, porta, timeout)
         servico = _nome_servico(info)
-        cves = []
+        cves, total, erro = [], 0, None
 
         if servico and narrar:
             console.print(f"    [green][+][/] Serviço: [bold]{servico}[/]")
         if servico and buscar_cve:
             if narrar:
                 console.print("    [yellow][*][/] Consultando NVD (CPE)...")
-            cves = buscar_vulnerabilidades(info["produto"], info.get("versao"))
-            if narrar and cves:
-                console.print(f"    [bold red][!][/] {len(cves)} CVE(s)")
+            consulta = consultar_cves(info["produto"], info.get("versao"))
+            cves, erro = consulta["cves"], consulta["erro"]
+            total = len(cves)
+            if erro:
+                log.warning("%s:%d NVD falhou: %s", alvo, porta, erro)
+                console.print(f"    [bold red][!] NVD indisponível ({erro}) — "
+                              "checagem de CVE INCOMPLETA nesta porta[/]")
+            elif narrar and cves:
+                console.print(f"    [bold red][!][/] {total} CVE(s)")
 
         if checar_config:
-            novos = checar_porta(alvo, porta, info, timeout)
+            novos = checar_porta(ip, porta, info, timeout)
             for a in novos:
                 a["alvo"] = alvo
             achados_config.extend(novos)
@@ -170,12 +196,19 @@ def escanear_alvo(alvo: str, portas: list[int], timeout: float, threads: int,
             "servico": servico,
             "protocolo": (info or {}).get("protocolo"),
             "cves": cves,
+            "cves_total": total,
+            "cve_erro": erro,
         })
 
     if buscar_cve:
-        if narrar:
+        if narrar and any(r["cves"] for r in resultados):
             console.print("\n[bold yellow][*][/] Enriquecendo com CISA KEV + EPSS...")
-        enriquecer(resultados)
+        status = enriquecer(resultados)
+        if not status["kev_ok"]:
+            console.print("[bold red][!] Catálogo CISA KEV indisponível — selos KEV ausentes.[/]")
+        if not status["epss_ok"]:
+            console.print("[bold red][!] API EPSS indisponível — probabilidades ausentes.[/]")
+    _priorizar_e_cortar(resultados, max_cves)
 
     if narrar:
         console.print()
@@ -248,14 +281,16 @@ HOSTS_DEMO = [
      "servicos": [{"porta": 22, "produto": "openssh", "versao": "8.9"},
                   {"porta": 80, "produto": "apache httpd", "versao": "2.4.49"},
                   {"porta": 443, "produto": "nginx", "versao": "1.18.0"}]},
-    {"ip": "192.168.0.101", "mac": "2c:dc:d7:8a:9b:0c", "descricao": "Banco de Dados",
+    {"ip": "192.168.0.101", "mac": "00:1a:11:aa:bb:02", "descricao": "Banco de Dados",
      "servicos": [{"porta": 3306, "produto": "mysql", "versao": "5.5.0"},
                   {"porta": 6379, "produto": "redis", "versao": "5.0.0"}]},
 ]
 
 
-def escanear_demo(host: dict) -> tuple[list[dict], list[dict]]:
-    """Cenário fictício, mas com CVEs reais da NVD. Para apresentar sem rede exposta."""
+
+
+def escanear_demo(host: dict, max_cves: int | None = 25) -> tuple[list[dict], list[dict]]:
+    """Cenário fictício, mas com CVEs reais da NVD. Não toca em nenhuma rede local."""
     console.print(painel_alvo(host["ip"], descricao=host["descricao"], mac=host["mac"]))
     console.print()
     resultados = []
@@ -263,32 +298,51 @@ def escanear_demo(host: dict) -> tuple[list[dict], list[dict]]:
         servico = f"{s['produto']} {s['versao']}"
         console.print(f"[bold yellow][*][/] Porta [cyan]{s['porta']}[/] — [bold]{servico}[/]")
         time.sleep(0.3)
-        cves = buscar_vulnerabilidades(s["produto"], s["versao"])
-        console.print(f"    [bold red][!][/] {len(cves)} CVE(s)" if cves
-                      else "    [dim][-] Sem CVE conhecido.[/]")
+        consulta = consultar_cves(s["produto"], s["versao"])
+        cves, erro = consulta["cves"], consulta["erro"]
+        if erro:
+            console.print(f"    [bold red][!] NVD indisponível ({erro})[/]")
+        else:
+            console.print(f"    [bold red][!][/] {len(cves)} CVE(s)" if cves
+                          else "    [dim][-] Sem CVE conhecido.[/]")
         resultados.append({"porta": s["porta"], "banner": f"demo {servico}",
-                           "servico": servico, "protocolo": "demo", "cves": cves})
+                           "servico": servico, "protocolo": "demo", "cves": cves,
+                           "cves_total": len(cves), "cve_erro": erro})
     enriquecer(resultados)
+    _priorizar_e_cortar(resultados, max_cves)
     console.print()
     console.print(montar_tabela_resumo(resultados))
     return resultados, []
 
 
-def listar_hosts():
-    aparelhos = read_arp_table()
-    console.print("[bold yellow][*][/] Descobrindo aparelhos (ARP + DNS reverso)...\n")
+def listar_hosts(escopo, consultar_fabricante: bool = False) -> list[dict]:
+    """Lista os aparelhos do cache ARP do sistema que estão DENTRO do escopo.
 
-    # Enriquecimento concorrente: fabricante (OUI) e nome por DNS reverso.
+    Não envia pacotes ARP: mostra só quem a máquina já conhece.
+    """
+    console.print("[bold yellow][*][/] Lendo o cache ARP do sistema (não envia pacotes)...\n")
+    todos = read_arp_table()
+    aparelhos = [a for a in todos if not fora_do_escopo(a["ip"], escopo)]
+    if len(todos) != len(aparelhos):
+        console.print(f"[dim]{len(todos) - len(aparelhos)} aparelho(s) fora do escopo "
+                      "foram ocultados.[/]")
+
     def _enriquecer(ap):
-        ap["fabricante"] = buscar_fabricante(ap["mac"])
+        if mac_aleatorio(ap["mac"]):
+            ap["fabricante"] = "Aleatório (privacidade)"
+        elif consultar_fabricante:
+            ap["fabricante"] = buscar_fabricante(ap["mac"])
+        else:
+            ap["fabricante"] = "não consultado"
         ap["hostname"] = ap.get("hostname_arp") or reverse_dns(ap["ip"])
         ap["aleatorio"] = mac_aleatorio(ap["mac"])
         return ap
 
-    with ThreadPoolExecutor(max_workers=16) as ex:
-        aparelhos = list(ex.map(_enriquecer, aparelhos))
+    if aparelhos:
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            aparelhos = list(ex.map(_enriquecer, aparelhos))
 
-    tabela = Table(border_style="cyan", title="Aparelhos na rede", title_style="bold")
+    tabela = Table(border_style="cyan", title="Aparelhos conhecidos (cache ARP)", title_style="bold")
     tabela.add_column("#", style="bold yellow", justify="center")
     tabela.add_column("IP", style="cyan")
     tabela.add_column("Nome (DNS)", style="white")
@@ -303,84 +357,213 @@ def listar_hosts():
         fab = ap["fabricante"]
         if fab == "Aleatório (privacidade)":
             fab = "[dim]— (MAC privado)[/]"
-        elif fab == "Desconhecido":
-            fab = "[dim]Desconhecido[/]"
+        elif fab in ("Desconhecido", "não consultado"):
+            fab = f"[dim]{fab}[/]"
         tabela.add_row(str(i), ap["ip"], nome, ap["mac"], tipo, fab,
                        ap.get("interface") or "—")
 
     console.print(tabela)
-    n_aleatorios = sum(1 for a in aparelhos if a["aleatorio"])
-    if n_aleatorios:
-        console.print(
-            f"[dim]ℹ {n_aleatorios} de {len(aparelhos)} usam MAC aleatório "
-            f"(privacidade) — sem fabricante público; normal em celulares/notebooks.[/]\n")
     return aparelhos
 
 
 def imprimir_veredito(resultados, achados_config):
     r = resumir(resultados, achados_config)
     cor = {"CRÍTICO": "bold red", "ALTO": "dark_orange", "MÉDIO": "yellow",
-           "BAIXO": "green", "OK": "green"}.get(r["rotulo_risco"], "white")
-    console.print(Panel(
-        f"Risco do host: [{cor}]{r['rotulo_risco']}[/] ({r['score_risco']}/100)\n"
-        f"CVEs: {r['total_cves']}  ·  KEV (exploração ativa): [bold red]{r['total_kev']}[/]  ·  "
-        f"Má configuração: {r['total_config']}",
-        title="[bold]Veredito[/]", border_style=cor.split()[-1], expand=False))
+           "BAIXO": "green", "OK": "green", "INDETERMINADO": "bold magenta"}.get(
+               r["rotulo_risco"], "white")
+    linhas = (f"Risco do host: [{cor}]{r['rotulo_risco']}[/] ({r['score_risco']}/100)\n"
+              f"CVEs: {r['total_cves']}  ·  KEV (exploração ativa): [bold red]{r['total_kev']}[/]  ·  "
+              f"Má configuração: {r['total_config']}")
+    if r["cves_nao_listados"]:
+        linhas += f"\n[dim]+{r['cves_nao_listados']} CVE(s) de menor prioridade não listados (use --max-cves 0).[/]"
+    if r["checagem_cve_incompleta"]:
+        portas = ", ".join(str(i["porta"]) for i in r["checagem_cve_incompleta"])
+        linhas += f"\n[bold red]⚠ Checagem de CVE incompleta (NVD falhou) nas portas: {portas}[/]"
+    console.print(Panel(linhas, title="[bold]Veredito[/]", border_style=cor.split()[-1], expand=False))
 
 
 # ----------------------------------- CLI -----------------------------------
 
+FORMATOS_VALIDOS = ("html", "json", "jsonl", "csv")
+AVISO_USO = ("[bold yellow]⚠ Use o NetScan apenas em redes próprias ou com autorização "
+             "explícita do responsável. Varredura não autorizada é ilegal.[/]")
+
+
+def _positivo(tipo, nome):
+    def conv(texto):
+        try:
+            valor = tipo(texto)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{nome} precisa ser um número: {texto!r}")
+        if valor <= 0:
+            raise argparse.ArgumentTypeError(f"{nome} precisa ser maior que zero: {texto!r}")
+        return valor
+    return conv
+
+
+def _threads(texto):
+    valor = _positivo(int, "--threads")(texto)
+    if valor > 1000:
+        raise argparse.ArgumentTypeError("--threads vai de 1 a 1000")
+    return valor
+
+
+def _nao_negativo(texto):
+    try:
+        valor = int(texto)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--max-cves precisa ser um número: {texto!r}")
+    if valor < 0:
+        raise argparse.ArgumentTypeError("--max-cves não pode ser negativo")
+    return valor
+
+
+def _formatos(texto):
+    formatos = [f.strip().lower() for f in texto.split(",") if f.strip()]
+    invalidos = [f for f in formatos if f not in FORMATOS_VALIDOS]
+    if invalidos or not formatos:
+        raise argparse.ArgumentTypeError(
+            f"formato inválido: {', '.join(invalidos) or texto!r} "
+            f"(use {','.join(FORMATOS_VALIDOS)})")
+    return formatos
+
+
 def construir_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="netscan",
-        description="Scanner de rede e relatório de vulnerabilidades (uso autorizado).")
+        description="Scanner de rede e relatório de vulnerabilidades. "
+                    "USO SOMENTE EM REDES PRÓPRIAS OU AUTORIZADAS.")
     p.add_argument("alvo", nargs="?",
-                   help="IP, hostname, CIDR (192.168.0.0/24) ou arquivo com um alvo por linha")
+                   help="IP, hostname, CIDR (172.30.99.0/24) ou arquivo com um alvo por linha")
     p.add_argument("-p", "--ports", default="top100",
-                   help="top100 | all | 1-1024 | 80,443,8080 (padrão: top100)")
-    p.add_argument("-f", "--format", default="html,json",
+                   help="top100 | all | 1-1024 | 80,443,8080 | top100,2222 (padrão: top100)")
+    p.add_argument("-f", "--format", default="html,json", type=_formatos,
                    help="html,json,jsonl,csv separados por vírgula (padrão: html,json)")
-    p.add_argument("-o", "--output", default=".", help="diretório de saída")
-    p.add_argument("-t", "--timeout", type=float, default=1.5, help="timeout por conexão (s)")
-    p.add_argument("--threads", type=int, default=100, help="threads de varredura")
+    p.add_argument("-o", "--output", default=".", help="diretório de saída (padrão: atual)")
+    p.add_argument("-t", "--timeout", type=_positivo(float, "--timeout"), default=1.5,
+                   help="timeout por conexão em segundos (padrão: 1.5)")
+    p.add_argument("--threads", type=_threads, default=100,
+                   help="conexões simultâneas, 1 a 1000 (padrão: 100)")
+    p.add_argument("--rate", type=_positivo(float, "--rate"), default=None,
+                   help="máximo de conexões novas por segundo (padrão: sem limite)")
+    p.add_argument("--scope", help="faixas autorizadas (ex.: 172.30.99.0/24,10.0.0.0/8); "
+                                   "alvos fora delas são recusados")
+    p.add_argument("--no-discovery", action="store_true",
+                   help="em faixas/listas, não fazer o ping TCP antes (varre todos os IPs)")
+    p.add_argument("--max-cves", type=_nao_negativo, default=25,
+                   help="CVEs listados por porta, os mais prioritários (0 = todos; padrão: 25)")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="confirma sem perguntar (alvos públicos ou faixas grandes)")
     p.add_argument("--no-vuln", action="store_true", help="não consultar CVEs (só portas/serviços)")
     p.add_argument("--no-config", action="store_true", help="pular checagens de má configuração")
     p.add_argument("--demo", action="store_true", help="modo demonstração (cenário fictício, CVEs reais)")
     p.add_argument("--no-diff", action="store_true", help="não comparar com o scan anterior")
-    p.add_argument("--state-dir", help="diretório dos snapshots (padrão: ~/.local/share/netscan)")
+    p.add_argument("--state-dir", help="diretório dos snapshots (padrão: ~/.local/share/netscan/snapshots)")
     p.add_argument("--log", help="arquivo de log (opcional)")
     p.add_argument("-q", "--quiet", action="store_true", help="menos saída no terminal")
     return p
 
 
-def rodar_cli(args) -> int:
+def _confirmar(pergunta: str, assumir_sim: bool) -> bool:
+    if assumir_sim:
+        return True
+    if not sys.stdin.isatty():
+        console.print(f"[bold red]{pergunta}[/] Sem terminal interativo: use --yes para confirmar.")
+        return False
+    return input(f"{pergunta} [s/N]: ").strip().lower() in ("s", "sim", "y", "yes")
+
+
+def rodar_cli(args, parser: argparse.ArgumentParser | None = None) -> int:
     if args.log:
         logging.basicConfig(filename=args.log, level=logging.INFO,
                             format="%(asctime)s %(levelname)s %(message)s")
-    formatos = [f.strip() for f in args.format.split(",") if f.strip()]
+    formatos = args.format
     saida = Path(args.output)
+    max_cves = args.max_cves or None
 
     if args.demo:
-        resultados, config = escanear_demo(HOSTS_DEMO[0])
+        resultados, config = escanear_demo(HOSTS_DEMO[0], max_cves)
         criados = salvar_relatorios("DEMO_" + HOSTS_DEMO[0]["ip"], resultados, config, formatos, saida)
         imprimir_veredito(resultados, config)
         console.print(f"[green]✓[/] Relatórios: {', '.join(str(c) for c in criados)}")
         return 0
 
+    if not args.alvo:
+        msg = "informe um alvo (IP, hostname, CIDR ou arquivo) ou use --demo"
+        if parser:
+            parser.error(msg)  # sai com código 2
+        console.print(f"[bold red]Erro:[/] {msg}")
+        return 2
+
     try:
         portas = parse_portas(args.ports)
         alvos = parse_alvos(args.alvo)
+        escopo = parse_escopo(args.scope)
     except ValueError as e:
         console.print(f"[bold red]Erro:[/] {e}")
         return 2
 
+    console.print(AVISO_USO)
+
+    # Escopo: resolve cada alvo e recusa o que estiver fora.
+    if escopo:
+        dentro = []
+        for alvo in alvos:
+            try:
+                ip = resolver(alvo)
+            except ValueError as e:
+                console.print(f"[bold red]Erro:[/] {e}")
+                continue
+            if fora_do_escopo(ip, escopo):
+                console.print(f"[bold red]Recusado:[/] {alvo} ({ip}) está fora do escopo {args.scope}")
+            else:
+                dentro.append(alvo)
+        alvos = dentro
+        if not alvos:
+            return 1
+
+    # Confirmação para alvos públicos ou faixas grandes.
+    publicos = []
+    for alvo in alvos[:1024]:
+        try:
+            if not e_privado(resolver(alvo)):
+                publicos.append(alvo)
+        except ValueError:
+            pass
+    if publicos or len(alvos) > 256:
+        motivo = (f"{len(publicos)} alvo(s) em IP PÚBLICO (ex.: {publicos[0]})" if publicos
+                  else f"{len(alvos)} endereços a varrer")
+        if not _confirmar(f"Atenção: {motivo}. Você tem autorização para varrer?", args.yes):
+            console.print("Cancelado.")
+            return 1
+
+    limitador = LimitadorTaxa(args.rate) if args.rate else None
+
+    # Descoberta: em faixas/listas, só varre quem responde ao ping TCP.
+    if len(alvos) > 1 and not args.no_discovery:
+        console.print(f"[bold yellow][*][/] Descobrindo hosts ativos em {len(alvos)} endereço(s) "
+                      "(ping TCP nas portas 22,80,443,445,3389)...")
+        total = len(alvos)
+        alvos = descobrir_hosts(alvos, args.timeout, min(args.threads, 64), limitador)
+        console.print(f"[bold green][+][/] {len(alvos)} de {total} respondem: [cyan]{alvos}[/]\n")
+        if not alvos:
+            console.print("[dim]Nenhum host respondeu. Se houver firewall descartando "
+                          "tudo, tente --no-discovery.[/]")
+            return 0
+
     state_dir = Path(args.state_dir) if args.state_dir else None
     log.info("iniciando scan de %d alvo(s) em %d porta(s)", len(alvos), len(portas))
+    falhas = 0
     for alvo in alvos:
-        resultados, config = escanear_alvo(
-            alvo, portas, args.timeout, args.threads,
-            buscar_cve=not args.no_vuln, checar_config=not args.no_config,
-            narrar=not args.quiet)
+        try:
+            resultados, config = escanear_alvo(
+                alvo, portas, args.timeout, args.threads,
+                buscar_cve=not args.no_vuln, checar_config=not args.no_config,
+                narrar=not args.quiet, limitador=limitador, max_cves=max_cves)
+        except ValueError as e:
+            console.print(f"[bold red]Erro:[/] {e}")
+            falhas += 1
+            continue
         if not resultados and not config:
             console.print(f"[dim]{alvo}: nenhuma porta aberta.[/]")
             continue
@@ -398,14 +581,15 @@ def rodar_cli(args) -> int:
         log.info("%s: %d portas, %d cves, %d config, mudanca=%s", alvo,
                  len(resultados), sum(len(r['cves']) for r in resultados), len(config),
                  bool(diff and diff.get("houve_mudanca")))
-    return 0
+    return 1 if falhas else 0
 
 
 def rodar_interativo() -> int:
-    """Menu de sempre, para quem roda sem argumentos."""
+    """Menu para quem roda sem argumentos. Sempre restrito a uma faixa informada."""
     banner_inicial()
+    console.print(AVISO_USO + "\n")
     console.print("[bold]Escolha o modo:[/]\n")
-    console.print("  [bold yellow]1.[/] Scan real (descobre e escaneia a sua rede)")
+    console.print("  [bold yellow]1.[/] Scan real (aparelhos já vistos pela sua máquina, numa faixa autorizada)")
     console.print("  [bold yellow]2.[/] Modo demonstração (cenário fictício, CVEs reais)")
     while True:
         modo = input("\nDigite 1 ou 2: ").strip()
@@ -417,14 +601,36 @@ def rodar_interativo() -> int:
         resultados, config = escanear_demo(HOSTS_DEMO[0])
         alvo = "DEMO_" + HOSTS_DEMO[0]["ip"]
     else:
-        aparelhos = listar_hosts()
+        while True:
+            texto = input("\nFaixa autorizada (CIDR, ex.: 172.30.99.0/24): ").strip()
+            try:
+                escopo = parse_escopo(texto)
+                if escopo:
+                    break
+            except ValueError as e:
+                print(e)
+            print("Informe uma faixa válida.")
+        consultar = input("Consultar o fabricante dos MACs em api.macvendors.com "
+                          "(envia os MACs para a internet)? [s/N]: ").strip().lower() in ("s", "sim")
+        aparelhos = listar_hosts(escopo, consultar)
+        if not aparelhos:
+            console.print("[yellow]Nenhum aparelho dessa faixa no cache ARP.[/] "
+                          "Para descobrir hosts ativos, use a CLI: "
+                          f"[cyan]python3 main.py {texto} --scope {texto}[/]")
+            return 0
         while True:
             try:
                 n = int(input("\nEscolha o número do aparelho: "))
+                if n < 1:
+                    raise IndexError
                 alvo = aparelhos[n - 1]["ip"]
                 break
             except (ValueError, IndexError):
                 print("Número inválido.")
+        resposta = input(f"Varrer as portas 1-1024 de {alvo}? [s/N]: ").strip().lower()
+        if resposta not in ("s", "sim", "y", "yes"):
+            console.print("Cancelado.")
+            return 1
         resultados, config = escanear_alvo(alvo, parse_portas("1-1024"), 1.5, 100)
 
     # Diff com o scan anterior do mesmo alvo.
@@ -440,9 +646,14 @@ def rodar_interativo() -> int:
 
 
 def main() -> int:
-    if len(sys.argv) == 1:
-        return rodar_interativo()
-    return rodar_cli(construir_parser().parse_args())
+    try:
+        if len(sys.argv) == 1:
+            return rodar_interativo()
+        parser = construir_parser()
+        return rodar_cli(parser.parse_args(), parser)
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[yellow]Interrompido.[/]")
+        return 130
 
 
 if __name__ == "__main__":

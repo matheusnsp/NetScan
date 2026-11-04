@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import warnings
 from datetime import datetime, timezone
 
 # Severidades usadas também no cálculo de risco (scoring.py).
@@ -115,11 +116,18 @@ def check_ftp_anonimo(host: str, port: int, timeout: float = 4.0) -> dict | None
 
 
 def check_telnet_aberto(host: str, port: int, timeout: float = 3.0) -> dict | None:
-    """Telnet aberto é risco por si só: credenciais trafegam em texto puro."""
+    """Telnet aberto é risco por si só: credenciais trafegam em texto puro.
+
+    Só marca se o serviço FALAR Telnet: negociação de opções (byte IAC 0xFF)
+    ou um prompt de login. Qualquer outro serviço na porta 23 não é Telnet.
+    """
     try:
         with _conectar(host, port, timeout) as s:
-            s.recv(64)
+            dados = s.recv(256)
     except OSError:
+        return None
+    texto = dados.decode("latin-1", errors="ignore").lower()
+    if not (dados.startswith(b"\xff") or "login" in texto or "username" in texto):
         return None
     return {
         "id": "TELNET-OPEN", "porta": port, "severidade": SEV_ALTA,
@@ -129,46 +137,90 @@ def check_telnet_aberto(host: str, port: int, timeout: float = 3.0) -> dict | No
     }
 
 
+def _validade_certificado(der: bytes) -> datetime | None:
+    """Extrai o fim da validade (UTC) de um certificado em DER. None se falhar."""
+    try:
+        from cryptography import x509
+    except ImportError:
+        return None
+    try:
+        cert = x509.load_der_x509_certificate(der)
+    except ValueError:
+        return None
+    fim = getattr(cert, "not_valid_after_utc", None)
+    if fim is None:  # cryptography < 42
+        fim = cert.not_valid_after.replace(tzinfo=timezone.utc)
+    return fim
+
+
+def aceita_tls_antigo(host: str, port: int, timeout: float = 5.0) -> str | None:
+    """Tenta um handshake limitado a TLS 1.0/1.1. Devolve a versão aceita ou None.
+
+    Se o OpenSSL local nem suportar mais esses protocolos, devolve None
+    (não dá para afirmar nada).
+    """
+    try:
+        with warnings.catch_warnings():
+            # Usar TLS 1.0/1.1 aqui é de propósito: é exatamente o que testamos.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            ctx.minimum_version = ssl.TLSVersion.TLSv1
+            ctx.maximum_version = ssl.TLSVersion.TLSv1_1
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except (ValueError, ssl.SSLError, AttributeError):
+        return None
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as s:
+                return s.version()
+    except (OSError, ssl.SSLError):
+        return None
+
+
 def check_tls(host: str, port: int, timeout: float = 5.0) -> list[dict]:
     """Inspeciona o certificado e os protocolos TLS. Não-destrutivo.
 
     Retorna achados para: certificado expirado e suporte a TLS 1.0/1.1 (obsoletos).
+
+    Obs.: com verify_mode=CERT_NONE, getpeercert() devolve {} (o Python só
+    decodifica certificados validados). Por isso pegamos o certificado em DER
+    (binary_form=True) e o decodificamos com a biblioteca cryptography.
     """
     achados: list[dict] = []
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    der = None
     try:
         with socket.create_connection((host, port), timeout=timeout) as raw:
             with ctx.wrap_socket(raw, server_hostname=host) as s:
-                cert = s.getpeercert()
-                versao = s.version()
-    except (OSError, ssl.SSLError):
+                der = s.getpeercert(binary_form=True)
+    except ssl.SSLError:
+        pass  # pode ser um servidor que SÓ fala TLS antigo: testamos abaixo
+    except OSError:
         return achados
 
-    # Protocolo obsoleto negociado
-    if versao in ("TLSv1", "TLSv1.1", "SSLv3"):
+    # Protocolo obsoleto: o contexto padrão exige TLS 1.2+, então é preciso um
+    # segundo handshake que SÓ ofereça TLS 1.0/1.1 para saber se o servidor aceita.
+    antigo = aceita_tls_antigo(host, port, timeout)
+    if antigo:
         achados.append({
             "id": "TLS-OLD", "porta": port, "severidade": SEV_MEDIA,
-            "titulo": f"Protocolo TLS obsoleto ({versao})",
+            "titulo": f"Protocolo TLS obsoleto aceito ({antigo})",
             "descricao": "Protocolos anteriores ao TLS 1.2 têm fraquezas conhecidas. "
                          "Desative TLS 1.0/1.1 e exija no mínimo TLS 1.2.",
         })
 
-    # Validade do certificado (quando o handshake expõe o notAfter)
-    if cert and cert.get("notAfter"):
-        try:
-            expira = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-            expira = expira.replace(tzinfo=timezone.utc)
-            if expira < datetime.now(timezone.utc):
-                achados.append({
-                    "id": "TLS-EXPIRED", "porta": port, "severidade": SEV_ALTA,
-                    "titulo": "Certificado TLS expirado",
-                    "descricao": f"O certificado venceu em {cert['notAfter']}. "
-                                 "Renove para evitar erros e ataques de downgrade.",
-                })
-        except ValueError:
-            pass
+    expira = _validade_certificado(der) if der else None
+    if expira and expira < datetime.now(timezone.utc):
+        achados.append({
+            "id": "TLS-EXPIRED", "porta": port, "severidade": SEV_ALTA,
+            "titulo": "Certificado TLS expirado",
+            "descricao": f"O certificado venceu em {expira:%Y-%m-%d %H:%M} UTC. "
+                         "Renove para evitar erros e ataques de downgrade.",
+        })
     return achados
 
 
@@ -186,7 +238,9 @@ def check_headers_http(banner: str, port: int) -> list[dict]:
 
     Não faz nova conexão — reaproveita o banner da detecção de serviço.
     """
-    if not banner or "HTTP/" not in banner:
+    # Só respostas HTTP de verdade (começam com a linha de status). Um Redis
+    # que ecoa "HTTP/1.0" num erro não é servidor web.
+    if not banner or not banner.lstrip().upper().startswith("HTTP/"):
         return []
     low = banner.lower()
     faltando = [desc for h, desc in HEADERS_SEGURANCA.items() if h not in low]
@@ -205,7 +259,7 @@ def checar_porta(host: str, port: int, servico: dict | None, timeout: float = 4.
     proto = (servico or {}).get("protocolo")
     produto = (servico or {}).get("produto") or ""
 
-    if port == 6379 or produto == "redis":
+    if port == 6379 or produto == "redis" or proto == "redis":
         r = check_redis_sem_auth(host, port, timeout)
         if r:
             achados.append(r)
