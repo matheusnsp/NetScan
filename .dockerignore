@@ -1,0 +1,13 @@
+# Nunca levar segredos nem lixo local para a imagem.
+.env
+.git
+venv*/
+**/__pycache__/
+*.pyc
+relatorio_*
+relatorios/
+.cache/
+snapshots/
+tests/
+.github/
+.vscode/

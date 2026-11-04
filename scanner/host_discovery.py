@@ -11,6 +11,7 @@ Fontes, na ordem: `arp -a` (macOS/BSD e Linux com net-tools), `ip neigh`
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 import socket
 import subprocess
@@ -108,8 +109,17 @@ def read_arp_table() -> list[dict]:
     aparelhos, vistos = [], set()
     for ap in brutos:
         ip, mac = ap["ip"], normalizar_mac(ap["mac"])
-        if ip.endswith(".255") or ip.startswith("224.") or mac in ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00"):
-            continue  # broadcast/multicast/incompleto, não é aparelho
+        try:
+            endereco = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        # Multicast (224.0.0.0/4, ex.: SSDP 239.255.255.250), broadcast (MAC
+        # ff:ff:...) e entradas incompletas não são aparelhos. Não descartamos
+        # pelo final ".255": numa /23 ou maior, x.x.x.255 pode ser um host real.
+        if (endereco.is_multicast or endereco.is_unspecified
+                or ip == "255.255.255.255"
+                or mac in ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00")):
+            continue
         if ip in vistos:
             continue
         vistos.add(ip)

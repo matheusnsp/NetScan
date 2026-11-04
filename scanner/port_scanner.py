@@ -14,6 +14,39 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+# Quantas portas ficaram sem resposta porque o sistema recusou abrir mais
+# sockets ("Too many open files") mesmo após as novas tentativas. Se for > 0,
+# a CLI avisa: essas portas podem estar abertas (falso negativo possível).
+_lock_recursos = threading.Lock()
+portas_sem_recurso = 0
+
+
+def zerar_contador_recursos() -> None:
+    global portas_sem_recurso
+    with _lock_recursos:
+        portas_sem_recurso = 0
+
+
+def _registrar_sem_recurso() -> None:
+    global portas_sem_recurso
+    with _lock_recursos:
+        portas_sem_recurso += 1
+
+
+def ip_local_para(destino: str) -> str | None:
+    """IP desta máquina usado para chegar em `destino` (None se não houver rota).
+
+    Usa um socket UDP só para consultar a tabela de rotas: connect() em UDP
+    não envia nenhum pacote.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((destino, 9))
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
 class LimitadorTaxa:
     """Garante no máximo `por_segundo` inícios de conexão por segundo.
 
@@ -72,6 +105,7 @@ def scan_port(host: str, port: int, timeout: float = 1.0) -> bool:
             time.sleep(0.05)
             continue
         return codigo == 0
+    _registrar_sem_recurso()
     return False
 
 

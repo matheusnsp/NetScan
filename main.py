@@ -24,8 +24,14 @@ import argparse
 import logging
 import sys
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# O Python 3.9 que vem no macOS é compilado com LibreSSL, e o urllib3 v2 avisa
+# disso a cada execução. O HTTPS para NVD/CISA/FIRST funciona normalmente, então
+# silenciamos SÓ essa mensagem (precisa vir antes de importar o requests).
+warnings.filterwarnings("ignore", message="urllib3 v2 only supports OpenSSL")
 
 from rich.align import Align
 from rich.console import Console
@@ -40,7 +46,9 @@ from scanner.enrich import enriquecer
 from scanner.host_discovery import read_arp_table, reverse_dns
 from scanner.mac_lookup import buscar_fabricante, mac_aleatorio
 from scanner.misconfig import checar_porta
-from scanner.port_scanner import LimitadorTaxa, descobrir_hosts, scan_port_list
+from scanner import port_scanner
+from scanner.port_scanner import (LimitadorTaxa, descobrir_hosts, ip_local_para,
+                                  scan_port_list)
 from scanner.scoring import prioridade_cve, resumir
 from scanner.service_detect import detectar_servico
 from scanner.snapshot import (carregar_snapshot, comparar, diff_para_jsonl,
@@ -153,7 +161,14 @@ def escanear_alvo(alvo: str, portas: list[int], timeout: float, threads: int,
         console.print(painel_alvo(rotulo, portas=f"{len(portas)} porta(s)"))
         console.print("\n[bold yellow][*][/] Varredura de portas...")
 
+    port_scanner.zerar_contador_recursos()
     portas_abertas = scan_port_list(ip, portas, timeout, threads, limitador)
+    if port_scanner.portas_sem_recurso:
+        n = port_scanner.portas_sem_recurso
+        log.warning("%s: %d porta(s) sem teste por falta de descritores", alvo, n)
+        console.print(f"[bold red][!] {n} porta(s) não puderam ser testadas: o sistema "
+                      "recusou abrir mais conexões (limite de arquivos abertos). "
+                      "Reduza --threads ou aumente 'ulimit -n'.[/]")
 
     if narrar:
         console.print(f"[bold green][+][/] {len(portas_abertas)} aberta(s): [cyan]{portas_abertas}[/]\n")
@@ -362,7 +377,8 @@ def listar_hosts(escopo, consultar_fabricante: bool = False) -> list[dict]:
         tabela.add_row(str(i), ap["ip"], nome, ap["mac"], tipo, fab,
                        ap.get("interface") or "—")
 
-    console.print(tabela)
+    if aparelhos:
+        console.print(tabela)
     return aparelhos
 
 
@@ -545,6 +561,11 @@ def rodar_cli(args, parser: argparse.ArgumentParser | None = None) -> int:
                       "(ping TCP nas portas 22,80,443,445,3389)...")
         total = len(alvos)
         alvos = descobrir_hosts(alvos, args.timeout, min(args.threads, 64), limitador)
+        # Não varrer a própria máquina: ela sempre "responde" ao ping TCP.
+        proprio = ip_local_para(alvos[0]) if alvos else None
+        if proprio in alvos:
+            alvos.remove(proprio)
+            console.print(f"[dim]Ignorando {proprio}: é o IP desta máquina.[/]")
         console.print(f"[bold green][+][/] {len(alvos)} de {total} respondem: [cyan]{alvos}[/]\n")
         if not alvos:
             console.print("[dim]Nenhum host respondeu. Se houver firewall descartando "

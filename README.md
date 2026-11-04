@@ -16,7 +16,7 @@
 | Internet | Só na máquina do scanner, e só para CVE/KEV/EPSS (NVD, CISA, FIRST). Com `--no-vuln`, roda 100% offline |
 | Chave da NVD | Opcional (ver [Chave da NVD](#-chave-da-nvd-opcional)) |
 
-**macOS:** o `python3` que vem com o sistema (Command Line Tools) costuma ser o 3.9. Ele funciona, mas é melhor um Python atual: `brew install python@3.12`.
+**macOS:** o `python3` que vem com o sistema (`/usr/bin/python3`, Command Line Tools) é o 3.9 e funciona; testado no macOS 27. Um Python mais novo também serve (`brew install python@3.12` ou o instalador do python.org).
 
 ---
 
@@ -45,7 +45,7 @@ python3 main.py --demo
 # 2) Um alvo local seu: sobe um servidor web na própria máquina e varre só ele
 python3 -m http.server 8000 &
 python3 main.py 127.0.0.1 -p 8000 --no-vuln
-kill %1
+kill %1          # encerra o servidor (no mesmo terminal em que foi iniciado)
 ```
 
 Os relatórios (`relatorio_*.html` e `.json`) são gravados na pasta atual. Para outra pasta, use `-o`.
@@ -139,7 +139,7 @@ O `.env` está no `.gitignore`. A chave só é enviada no cabeçalho HTTPS para 
 
 | Etapa | Tráfego | Vai para |
 |---|---|---|
-| Descoberta (faixas/listas) | Até 5 conexões TCP por IP (portas 22, 80, 443, 445, 3389); host inexistente só gera ARP "who-has" | alvos |
+| Descoberta (faixas/listas) | Até 5 conexões TCP por IP (portas 22, 80, 443, 445, 3389), parando na primeira resposta; host inexistente só gera ARP "who-has". O IP da própria máquina é ignorado | alvos |
 | Cache ARP (modo interativo) | Nenhum pacote ARP. DNS reverso (PTR) por aparelho e, se você aceitar, HTTPS para `api.macvendors.com` | seu DNS / internet |
 | Varredura de portas | **Handshake TCP completo** (SYN → SYN/ACK → ACK → FIN) por porta aberta; SYN → RST por porta fechada. Cerca de **6 mil conexões/s** com 100 threads na mesma rede; limite com `--rate` | alvos |
 | Detecção de serviço e checagens | 1 a 3 conexões extras por porta aberta: leitura do banner, `HEAD / HTTP/1.0` sem User-Agent, `INFO server`/`PING` no Redis, handshakes TLS (incluindo um que oferece só TLS 1.0/1.1) e login `anonymous` no FTP | alvos |
@@ -151,14 +151,41 @@ O `.env` está no `.gitignore`. A chave só é enviada no cabeçalho HTTPS para 
 
 ## 🧪 Laboratório Docker isolado (sugestão)
 
+No macOS e no Windows, abra o Docker Desktop antes (`open -a Docker` no Mac).
+
+**1. Crie a rede e os alvos.** `--internal` impede que os alvos saiam para a internet.
+
 ```bash
 docker network create --internal --subnet 172.30.99.0/28 netscan-lab
 docker run -d --name lab-nginx --network netscan-lab --ip 172.30.99.2 nginx:1.18.0
 docker run -d --name lab-redis --network netscan-lab --ip 172.30.99.4 redis:5.0.0
+```
+
+**2a. Linux:** o host alcança os IPs dos containers diretamente.
+
+```bash
 python3 main.py 172.30.99.0/28 --scope 172.30.99.0/28
 ```
 
-`--internal` impede que os alvos saiam para a internet. **No Linux**, o host alcança os IPs dos containers diretamente. **No macOS e no Windows** (Docker Desktop), os containers rodam numa VM e o host **não** alcança esses IPs: rode o NetScan num container ligado à mesma rede (`docker run --rm -it --network netscan-lab -v "$PWD":/app -w /app python:3.12-slim sh -c "pip install -r requirements.txt && python main.py 172.30.99.0/28 --no-vuln"`). Numa rede `--internal`, a parte de CVE precisa de `--no-vuln`, porque o container não tem internet.
+**2b. macOS e Windows (Docker Desktop):** os containers rodam numa VM e o host **não** alcança esses IPs. Rode o NetScan num container ligado à rede do lab. O `docker build` instala as dependências usando a rede padrão, que tem internet; a varredura roda depois na rede `--internal`.
+
+```bash
+docker build -t netscan .
+mkdir -p relatorios
+docker run --rm -it --user "$(id -u):$(id -g)" --network netscan-lab \
+  -v "$PWD/relatorios":/out netscan \
+  172.30.99.0/28 --scope 172.30.99.0/28 --no-vuln -o /out
+```
+
+- Dentro da rede `--internal` o container não tem internet, por isso o `--no-vuln`. Para ter CVEs, rode no Linux pelo host (passo 2a).
+- O `-it` exige um terminal. Em scripts ou CI, use só `-i`.
+- O IP do próprio scanner é ignorado automaticamente na descoberta. O gateway da rede (`.1`) aparece como host: no Linux ele é a própria máquina; no Docker Desktop, é a VM do Docker.
+
+**3. Limpeza:**
+
+```bash
+docker rm -f lab-nginx lab-redis && docker network rm netscan-lab
+```
 
 ---
 
@@ -167,11 +194,12 @@ python3 main.py 172.30.99.0/28 --scope 172.30.99.0/28
 | Sintoma | Causa e solução |
 |---|---|
 | `ModuleNotFoundError: No module named 'rich'` | venv não ativado: `source venv/bin/activate` |
+| `Cannot connect to the Docker daemon` / `docker.sock: no such file` | Docker Desktop fechado: abra com `open -a Docker` e espere alguns segundos |
 | `TypeError: unsupported operand type(s) for \|` | Python antigo (< 3.9): instale um mais novo |
 | `⚠ NVD indisponível (HTTP 429/503...)` | Limite de requisições ou NVD fora do ar. Espere e rode de novo (o cache guarda o que deu certo) ou configure a chave |
 | "Nenhum host respondeu" numa faixa | Firewall descartando tudo: tente `--no-discovery` |
 | Modo interativo não lista ninguém | O cache ARP só tem máquinas já contatadas: use a CLI com a faixa (`python3 main.py 172.30.99.0/28`) |
-| Varredura lenta com `--threads` alto | O sistema limita os arquivos abertos (no macOS, 256 por padrão). Reduza `--threads` ou rode `ulimit -n 4096` |
+| Varredura lenta com `--threads` alto, ou o aviso "porta(s) não puderam ser testadas" | O sistema limita os arquivos abertos (no macOS, 256 por padrão). Reduza `--threads` ou rode `ulimit -n 4096`, que vale só para o terminal atual |
 
 ---
 
@@ -192,6 +220,7 @@ NetScan/
 │   ├── targets.py           # perfis de porta, alvos (CIDR/arquivo), escopo
 │   └── mac_lookup.py        # fabricante pelo MAC
 ├── reporter/                # HTML, JSON/JSONL, CSV
+├── Dockerfile               # imagem para rodar dentro de um lab Docker
 ├── tests/                   # pytest (offline: só 127.0.0.1 e dublês)
 ├── requirements.txt         # dependências de execução
 └── requirements-dev.txt     # + pytest
@@ -227,10 +256,10 @@ Fontes de dados: **NVD/NIST** (CVE por CPE), **CISA KEV** (exploração ativa), 
 
 - [x] Diff entre scans (alertar porta/serviço/CVE que surgiu desde a última varredura)
 - [x] GitHub Actions rodando a suíte
+- [x] Dockerfile
 - [ ] Exportação para PDF
 - [ ] Varredura UDP
 - [ ] Interface web (Flask/FastAPI)
-- [ ] Dockerfile
 
 ---
 

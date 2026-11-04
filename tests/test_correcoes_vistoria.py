@@ -12,7 +12,7 @@ import requests
 
 import main
 from reporter.html_report import gerar_html
-from scanner import enrich, host_discovery, vuln_checker
+from scanner import enrich, host_discovery, port_scanner, vuln_checker
 from scanner.misconfig import check_headers_http, check_telnet_aberto, check_tls
 from scanner.port_scanner import (LimitadorTaxa, descobrir_hosts, host_responde,
                                   scan_port)
@@ -111,8 +111,14 @@ def test_host_responde_com_porta_fechada_conta_como_vivo():
     assert host_responde("127.0.0.1", (_porta_fechada(),), 0.5) is True
 
 
-def test_descobrir_hosts_mantem_ordem():
-    assert descobrir_hosts(["127.0.0.1", "127.0.0.2"], 0.5) == ["127.0.0.1", "127.0.0.2"]
+def test_descobrir_hosts_filtra_e_mantem_ordem(monkeypatch):
+    # Dublê: não depende de quais endereços de loopback o sistema responde
+    # (no Linux toda a 127.0.0.0/8 responde; no macOS só 127.0.0.1).
+    vivos = {"10.0.0.3", "10.0.0.1"}
+    monkeypatch.setattr(port_scanner, "host_responde",
+                        lambda ip, *a, **k: ip in vivos)
+    ips = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    assert descobrir_hosts(ips, 0.1) == ["10.0.0.1", "10.0.0.3"]
 
 
 def test_limitador_de_taxa_espaca_conexoes():
@@ -144,6 +150,18 @@ def test_sem_comando_arp_usa_ip_neigh(monkeypatch):
     monkeypatch.setattr(host_discovery, "_rodar", lambda cmd: saidas[cmd[0]])
     aps = host_discovery.read_arp_table()
     assert [a["ip"] for a in aps] == ["172.30.99.3"]
+
+
+def test_multicast_e_broadcast_nao_viram_aparelho(monkeypatch):
+    saida = ("? (239.255.255.250) at 1:0:5e:7f:ff:fa on en0 ifscope permanent [ethernet]\n"
+             "? (224.0.0.251) at 1:0:5e:0:0:fb on en0 ifscope permanent [ethernet]\n"
+             "? (192.168.1.255) at ff:ff:ff:ff:ff:ff on en0 ifscope [ethernet]\n"
+             "? (10.0.1.255) at 2:0:5e:10:20:31 on en0 ifscope [ethernet]\n"
+             "? (10.0.0.7) at 2:0:5e:10:20:32 on en0 ifscope [ethernet]\n")
+    monkeypatch.setattr(host_discovery, "_rodar", lambda cmd: saida if cmd[0] == "arp" else None)
+    ips = [a["ip"] for a in host_discovery.read_arp_table()]
+    # 10.0.1.255 é host válido numa /23; só multicast e broadcast (MAC ff..) saem.
+    assert ips == ["10.0.1.255", "10.0.0.7"]
 
 
 def test_parse_proc_net_arp():
@@ -354,3 +372,22 @@ def test_alvo_fora_do_escopo_e_recusado(monkeypatch, tmp_path, capsys):
                                      "-p", "80", "--no-vuln", "-o", str(tmp_path)])
     assert main.main() == 1
     assert "fora do escopo" in capsys.readouterr().out
+
+
+def test_sem_descritores_conta_e_nao_explode(monkeypatch):
+    """'Too many open files' persistente: a porta não é dada como aberta,
+    mas fica registrada para a CLI avisar (falso negativo possível)."""
+    import errno as _errno
+
+    def _sem_fd(*a, **k):
+        raise OSError(_errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(port_scanner.socket, "socket", _sem_fd)
+    monkeypatch.setattr(port_scanner.time, "sleep", lambda s: None)
+    port_scanner.zerar_contador_recursos()
+    assert scan_port("127.0.0.1", 80, 0.1) is False
+    assert port_scanner.portas_sem_recurso == 1
+
+
+def test_ip_local_para_loopback():
+    assert port_scanner.ip_local_para("127.0.0.1") == "127.0.0.1"
