@@ -1,6 +1,6 @@
 # 🔍 NetScan — Network Scanner & Vulnerability Reporter
 
-> Ferramenta de linha de comando (CLI) em Python que automatiza o reconhecimento inicial de um teste de penetração: descoberta de hosts, varredura de portas, **identificação de serviço por protocolo**, cruzamento com CVEs da NVD/NIST **por CPE**, **priorização com CISA KEV + EPSS** e **checagens de má configuração**.
+> Ferramenta de linha de comando (CLI) em Python para descoberta de ativos e gestão de vulnerabilidades em redes que você administra: inventário de hosts e serviços, identificação de serviço por protocolo, cruzamento com CVEs da NVD/NIST por CPE, priorização com CISA KEV + EPSS, checagens de má configuração e monitoramento do que mudou entre varreduras. Pensada para o lado da defesa (saber o que está exposto e o que corrigir primeiro, com saída em JSON Lines para SIEM), e útil também como apoio em avaliações autorizadas.
 
 > ⚠️ **Use apenas em redes próprias ou com autorização explícita do responsável.** Varredura não autorizada é ilegal. Veja o [aviso legal](#️-aviso-legal).
 
